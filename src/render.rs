@@ -63,7 +63,7 @@ fn powerline_shape(text: &str, rect: Rect, color: Color32) -> Option<egui::Shape
     Some(if filled {
         egui::Shape::convex_polygon(points, color, Stroke::NONE)
     } else {
-        egui::Shape::line(points, Stroke::new(1.0, color))
+        egui::Shape::line(points, Stroke::new(1.0_f32, color))
     })
 }
 
@@ -277,7 +277,7 @@ impl Renderer {
                     if enabled {
                         foregrounds.push(egui::Shape::line_segment(
                             [pos + vec2(0.0, height), pos + vec2(cell.x, height)],
-                            Stroke::new(1.0, fg),
+                            Stroke::new(1.0_f32, fg),
                         ));
                     }
                 }
@@ -347,7 +347,7 @@ impl Renderer {
                     painter.rect_stroke(
                         cursor_rect,
                         0,
-                        Stroke::new(if active { 1.5 } else { 0.75 }, c),
+                        Stroke::new(if active { 1.5_f32 } else { 0.75_f32 }, c),
                         egui::StrokeKind::Inside,
                     );
                 }

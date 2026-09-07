@@ -65,19 +65,73 @@
               vulkan-loader
             ]
           );
-          # wgpu dlopens the Vulkan loader and libEGL by soname, and those in turn
-          # dlopen the GPU vendor driver named in the ICD/vendor JSON. Nixpkgs' own
-          # store paths cover the loaders but never the driver, which lives outside
-          # /nix/store: under /run/opengl-driver on NixOS, under the distro's library
-          # directory everywhere else. Without these the loader finds zero drivers and
-          # wgpu reports "Failed to create surface for any enabled backend: {}".
-          # They go last so /nix/store still wins for everything else.
-          driverLibraries = [
-            "/run/opengl-driver/lib"
+          # wgpu dlopens the Vulkan loader and libEGL, which in turn dlopen the GPU
+          # vendor driver named in the ICD / EGL vendor JSON. Nixpkgs supplies the
+          # loaders but never the driver: that lives outside /nix/store, under
+          # /run/opengl-driver on NixOS and in the distro's library directory
+          # everywhere else. With no driver reachable the loaders enumerate nothing
+          # and wgpu fails with "Failed to create surface for any enabled backend: {}".
+          #
+          # The host directories cannot simply go on LD_LIBRARY_PATH: it outranks the
+          # binary's DT_RUNPATH, so the host's libc.so.6 / libgcc_s.so.1 would load
+          # into a process linked against the store's glibc and segfault on startup.
+          # Instead, link only the vendor driver objects into a private directory and
+          # expose that. Their remaining dependencies (libc, libX11, ...) then resolve
+          # against the already-loaded store libraries.
+          hostDriverGlobs = [
+            "libGLX_*.so*" # GLX vendor drivers (glvnd dispatch stays from the store)
+            "libEGL_*.so*"
+            "libGLESv1_CM_*.so*"
+            "libGLESv2_*.so*"
+            "libnvidia-*.so*"
+            "libcuda.so*"
+            "libvulkan_*.so*" # mesa's radv / anv, not the loader itself
+            "libgallium*.so*"
+            "*_dri.so"
+            "libdrm*.so*"
+          ];
+          hostLibraryDirs = [
             "/usr/lib/${pkgs.stdenv.hostPlatform.parsed.cpu.name}-linux-gnu"
             "/usr/lib64"
             "/usr/lib"
           ];
+          # Runs inside the wrapper, before exec.
+          collectHostDrivers = ''
+            if [ -d /run/opengl-driver/lib ]; then
+              export LD_LIBRARY_PATH="''${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/run/opengl-driver/lib"
+            elif [ -z "''${SLERM_NO_HOST_DRIVERS:-}" ]; then
+              slermCache="''${XDG_CACHE_HOME:-$HOME/.cache}/slerm/gpu-drivers"
+              slermStale=1
+              if [ -e "$slermCache/.stamp" ]; then
+                slermStale=0
+                for slermDir in ${lib.concatStringsSep " " hostLibraryDirs}; do
+                  if [ -d "$slermDir" ] && [ "$slermDir" -nt "$slermCache/.stamp" ]; then
+                    slermStale=1
+                  fi
+                done
+              fi
+              if [ "$slermStale" = 1 ]; then
+                slermTmp="$slermCache.$$"
+                rm -rf "$slermTmp" && mkdir -p "$slermTmp" || slermTmp=""
+                for slermDir in ${lib.concatStringsSep " " hostLibraryDirs}; do
+                  [ -n "$slermTmp" ] && [ -d "$slermDir" ] || continue
+                  for slermGlob in ${lib.concatStringsSep " " hostDriverGlobs}; do
+                    for slermLib in "$slermDir"/$slermGlob; do
+                      [ -e "$slermLib" ] || continue
+                      ln -sfn "$slermLib" "$slermTmp/''${slermLib##*/}"
+                    done
+                  done
+                done
+                if [ -n "$slermTmp" ]; then
+                  : > "$slermTmp/.stamp"
+                  rm -rf "$slermCache" && mv "$slermTmp" "$slermCache" || rm -rf "$slermTmp"
+                fi
+              fi
+              [ -d "$slermCache" ] &&
+                export LD_LIBRARY_PATH="''${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$slermCache"
+              unset slermCache slermStale slermTmp slermDir slermGlob slermLib
+            fi
+          '';
           ghosttyEnv = {
             GHOSTTY_SOURCE_DIR = "${ghostty-src}";
             GHOSTTY_ZIG_SYSTEM_DIR = "${ghosttyDeps}";
@@ -130,7 +184,7 @@
               postFixup = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                 wrapProgram "$out/bin/slerm" \
                   --suffix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibraries} \
-                  --suffix LD_LIBRARY_PATH : ${lib.concatStringsSep ":" driverLibraries}
+                  --run ${lib.escapeShellArg collectHostDrivers}
               '';
 
               meta = {
@@ -161,7 +215,8 @@
               shellHook = ''
                 export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                  export LD_LIBRARY_PATH="${lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:${lib.concatStringsSep ":" driverLibraries}"
+                  export LD_LIBRARY_PATH="${lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                  ${collectHostDrivers}
                 ''}
               '';
             }

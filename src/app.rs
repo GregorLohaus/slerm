@@ -526,7 +526,7 @@ fn show_pane(
         rect,
         0,
         Stroke::new(
-            1.0,
+            1.0_f32,
             if active {
                 accent
             } else {
