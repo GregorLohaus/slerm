@@ -177,10 +177,24 @@ impl Tab {
     pub fn detach(&mut self, id: PaneId) {
         self.root = self.root.take().and_then(|r| r.remove(id));
         self.floats.retain(|p| *p != id);
+        if self.floats.is_empty() {
+            self.floats_visible = false;
+        }
         self.zoomed = false;
     }
     pub fn is_visible(&self, id: PaneId) -> bool {
         self.floats_visible || !self.floats.contains(&id)
+    }
+
+    pub fn navigation_ids(&self) -> Vec<PaneId> {
+        if self.floats_visible && !self.floats.is_empty() {
+            self.floats.clone()
+        } else {
+            self.ids()
+                .into_iter()
+                .filter(|id| !self.floats.contains(id))
+                .collect()
+        }
     }
 
     pub fn toggle_floats(&mut self) {
@@ -213,7 +227,7 @@ impl Tab {
         } else {
             1.0
         };
-        let ids = self.ids();
+        let ids = self.navigation_ids();
         let next = rects
             .iter()
             .filter_map(|(id, rect)| {
@@ -248,16 +262,14 @@ impl Tab {
         }
     }
     pub fn cycle(&mut self, backwards: bool) {
-        let ids: Vec<_> = self
-            .ids()
-            .into_iter()
-            .filter(|id| self.floats_visible || !self.floats.contains(id))
-            .collect();
+        let ids = self.navigation_ids();
         if ids.is_empty() {
             return;
         }
-        let pos = ids.iter().position(|p| *p == self.active).unwrap_or(0);
-        self.active = ids[(pos + if backwards { ids.len() - 1 } else { 1 }) % ids.len()];
+        self.active = match ids.iter().position(|p| *p == self.active) {
+            Some(pos) => ids[(pos + if backwards { ids.len() - 1 } else { 1 }) % ids.len()],
+            None => ids[if backwards { ids.len() - 1 } else { 0 }],
+        };
     }
 }
 
@@ -361,5 +373,50 @@ mod tests {
             rects.iter().map(|(_, rect)| rect.area()).sum::<f32>(),
             workspace.area()
         );
+    }
+
+    #[test]
+    fn visible_floats_constrain_directional_and_cyclic_navigation() {
+        let mut tab = Tab::new(1, 1);
+        tab.root.as_mut().unwrap().split(1, 2, Axis::Horizontal);
+        tab.floats = vec![3, 4, 5, 6];
+        tab.floats_visible = true;
+        tab.active = 3;
+        let rect = |x, y| Rect::from_min_size(egui::pos2(x, y), egui::vec2(80.0, 80.0));
+        let rects = [
+            (1, rect(50.0, 0.0)),
+            (2, rect(0.0, 50.0)),
+            (3, rect(0.0, 0.0)),
+            (4, rect(100.0, 0.0)),
+            (5, rect(100.0, 100.0)),
+            (6, rect(0.0, 100.0)),
+        ];
+        for (direction, expected) in [
+            (Direction::Right, 4),
+            (Direction::Down, 5),
+            (Direction::Left, 6),
+            (Direction::Up, 3),
+        ] {
+            tab.focus_direction(direction, &rects);
+            assert_eq!(tab.active, expected);
+        }
+        tab.focus_direction(Direction::Left, &rects);
+        assert_eq!(tab.active, 3);
+        tab.cycle(true);
+        assert_eq!(tab.active, 6);
+        tab.cycle(false);
+        assert_eq!(tab.active, 3);
+        tab.floats = vec![3];
+        tab.focus_direction(Direction::Right, &rects);
+        assert_eq!(tab.active, 3);
+        tab.focus_direction(Direction::Down, &rects);
+        assert_eq!(tab.active, 3);
+        tab.cycle(false);
+        assert_eq!(tab.active, 3);
+        tab.floats_visible = false;
+        tab.cycle(false);
+        assert_eq!(tab.active, 1);
+        tab.cycle(false);
+        assert_eq!(tab.active, 2);
     }
 }

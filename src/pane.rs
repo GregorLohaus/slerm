@@ -2,7 +2,7 @@ use crate::{
     config::{Config, rgb},
     input,
     pty::Pty,
-    render::Renderer,
+    render::{Renderer, cell_size},
 };
 use anyhow::{Result, ensure};
 use egui::{FontId, Rect, Sense, vec2};
@@ -109,9 +109,13 @@ impl Pane {
 
     pub fn drain(&mut self, ctx: &egui::Context) {
         // Bound work per frame as well as queued bytes, so one busy PTY cannot starve others.
+        let mut drained = 0;
         for _ in 0..64 {
             match self.pty.output.try_recv() {
-                Ok(data) => self.terminal.vt_write(&data),
+                Ok(data) => {
+                    self.terminal.vt_write(&data);
+                    drained += 1;
+                }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
@@ -124,8 +128,10 @@ impl Pane {
         if let Some(e) = self.callback_error.borrow_mut().take() {
             self.error = Some(e);
         }
-        if !self.dead {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        // Workers wake the UI on output/exit/errors. Only poll again if we hit
+        // the read budget and may have left queued output behind.
+        if drained == 64 {
+            ctx.request_repaint();
         }
     }
 
@@ -185,15 +191,8 @@ impl Pane {
         active: bool,
     ) -> Result<bool> {
         let font = FontId::monospace(config.font_size);
-        let cw = ui
-            .painter()
-            .layout_no_wrap("M".into(), font.clone(), egui::Color32::WHITE)
-            .size()
-            .x
-            .ceil()
-            .max(1.0);
-        let ch = (config.font_size * 1.3).ceil();
-        let cell = vec2(cw, ch);
+        let cell = cell_size(ui.painter(), &font);
+        let (cw, ch) = (cell.x, cell.y);
         let grid = rect.shrink(6.0);
         if grid.width() < cw || grid.height() < ch {
             return Ok(false);

@@ -76,7 +76,8 @@ impl App {
         let active = self.tabs[self.current].active;
         match action {
             Action::NewPane => {
-                let action = if self.tabs[self.current].floats_visible {
+                let tab = &self.tabs[self.current];
+                let action = if tab.floats_visible && !tab.floats.is_empty() {
                     Action::NewFloating
                 } else {
                     let rect = self.panes[&active].last_rect;
@@ -195,19 +196,42 @@ impl App {
     }
 
     fn close(&mut self, id: PaneId, ctx: &egui::Context) {
-        self.panes.remove(&id);
+        let closed_rect = self
+            .panes
+            .remove(&id)
+            .map(|pane| pane.last_rect)
+            .filter(|rect| rect.is_positive() && rect.is_finite());
         for tab in &mut self.tabs {
             if !tab.ids().contains(&id) {
                 continue;
             }
+            let was_floating = tab.floats.contains(&id);
             tab.detach(id);
-            if tab.active == id
-                && let Some(next) = tab.ids().first()
-            {
-                tab.active = *next;
-            }
             if tab.root.is_none() {
                 tab.floats_visible = true;
+            }
+            if tab.active == id {
+                if was_floating && !tab.floats.is_empty() {
+                    let nearest = tab
+                        .floats
+                        .iter()
+                        .map(|candidate| {
+                            let rect = self.panes[candidate].last_rect;
+                            let distance = closed_rect
+                                .filter(|_| rect.is_positive() && rect.is_finite())
+                                .map_or(f32::INFINITY, |source| {
+                                    source.center().distance_sq(rect.center())
+                                });
+                            (*candidate, distance)
+                        })
+                        .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+                    if let Some((next, _)) = nearest {
+                        tab.active = next;
+                        tab.floats_visible = true;
+                    }
+                } else if let Some(next) = tab.navigation_ids().first() {
+                    tab.active = *next;
+                }
             }
         }
         self.tabs.retain(|t| !t.ids().is_empty());
@@ -289,6 +313,9 @@ impl App {
     }
 
     fn flush_keys(&mut self, events: &mut Vec<egui::Event>) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
         let active = self.tabs[self.current].active;
         if !self.tabs[self.current].is_visible(active) {
             events.clear();
@@ -602,5 +629,82 @@ mod tests {
         app.action(Action::ToggleFloats, &ctx).unwrap();
         assert_eq!(app.tabs[0].floats, vec![3]);
         assert!(app.tabs[0].floats_visible);
+    }
+
+    #[test]
+    fn new_pane_floats_only_when_existing_floats_are_visible() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        app.action(Action::NewPane, &ctx).unwrap();
+        assert!(app.tabs[0].floats.is_empty());
+        assert_eq!(app.tabs[0].active, 2);
+
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        assert_eq!(app.tabs[0].floats, vec![3]);
+        app.action(Action::NewPane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].floats, vec![3, 4]);
+
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        app.action(Action::NewPane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].floats, vec![3, 4]);
+        assert_eq!(app.tabs[0].active, 5);
+        assert!(!app.tabs[0].floats_visible);
+
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        app.action(Action::ClosePane, &ctx).unwrap();
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert!(app.tabs[0].floats.is_empty());
+        assert!(!app.tabs[0].floats_visible);
+        app.action(Action::NewPane, &ctx).unwrap();
+        assert!(app.tabs[0].floats.is_empty());
+        assert_eq!(app.tabs[0].active, 6);
+
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        assert_eq!(app.tabs[0].floats, vec![7]);
+        app.action(Action::ToggleFloating, &ctx).unwrap();
+        assert!(!app.tabs[0].floats_visible);
+        app.action(Action::NewPane, &ctx).unwrap();
+        assert!(app.tabs[0].floats.is_empty());
+        assert_eq!(app.tabs[0].active, 8);
+    }
+
+    #[test]
+    fn closing_float_focuses_another_float_before_tiles() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        app.action(Action::NewFloating, &ctx).unwrap();
+        app.action(Action::NewFloating, &ctx).unwrap();
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 2);
+        app.action(Action::NewFloating, &ctx).unwrap();
+        app.close(1, &ctx);
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 2);
+        assert!(app.tabs[0].floats_visible);
+    }
+
+    #[test]
+    fn closing_float_selects_nearest_float_not_first_or_nearer_tile() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        for _ in 0..3 {
+            app.action(Action::NewFloating, &ctx).unwrap();
+        }
+        for (id, x, y) in [
+            (1, 200.0, 200.0),
+            (2, 0.0, 0.0),
+            (3, 180.0, 180.0),
+            (4, 200.0, 200.0),
+        ] {
+            app.panes.get_mut(&id).unwrap().last_rect =
+                Rect::from_min_size(egui::pos2(x, y), vec2(100.0, 100.0));
+        }
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 3);
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 2);
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 1);
     }
 }

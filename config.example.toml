@@ -2,7 +2,7 @@
 # Omit shell to use $SHELL. Arguments are separate array entries.
 # shell = ["/bin/bash", "--login"]
 # working_directory = "/home/you"
-font_path = "/usr/local/share/fonts/MononokiNerdFont-Regular.ttf"
+font_path = "/usr/local/share/fonts/MononokiNerdFontMono-Regular.ttf"
 font_size = 16
 scrollback = 10000
 window_width = 1100
