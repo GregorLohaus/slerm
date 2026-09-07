@@ -47,7 +47,7 @@ impl App {
     ) -> Result<Self> {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         cc.egui_ctx.set_fonts(fonts(&config)?);
-        let pane = Pane::new(&config, &cc.egui_ctx)?;
+        let pane = Pane::new(&config, &cc.egui_ctx, None)?;
         Ok(Self {
             config,
             config_path,
@@ -65,7 +65,13 @@ impl App {
             self.panes.len() < self.config.multiplexer.max_panes,
             "Pane limit reached"
         );
-        let pane = Pane::new(&self.config, ctx)?;
+        // A new pane starts where the pane it was spawned from currently sits.
+        let cwd = self
+            .tabs
+            .get(self.current)
+            .and_then(|tab| self.panes.get(&tab.active))
+            .and_then(Pane::cwd);
+        let pane = Pane::new(&self.config, ctx, cwd.as_deref())?;
         let id = self.next_id;
         self.next_id += 1;
         self.panes.insert(id, pane);
@@ -337,6 +343,7 @@ impl eframe::App for App {
         for pane in self.panes.values_mut() {
             pane.drain(ctx);
         }
+        grab_keys(ctx);
         if let Err(e) = self.keyboard(ctx) {
             self.error = Some(e.to_string());
         }
@@ -482,6 +489,30 @@ impl eframe::App for App {
     }
 }
 
+/// Parks keyboard focus on a widget that never exists, with every navigation key
+/// filtered out. Otherwise egui spends Tab, the arrows and Escape on moving focus
+/// between the tab bar and the menu buttons instead of leaving them for the shell.
+fn grab_keys(ctx: &egui::Context) {
+    let id = egui::Id::new("keys");
+    // Registers the id for this pass so egui's dead-mans-switch keeps the focus.
+    ctx.check_for_id_clash(id, Rect::NOTHING, "key sink");
+    ctx.memory_mut(|m| {
+        if m.focused() != Some(id) {
+            m.request_focus(id);
+        }
+        // Only applies once the sink has held focus for a full frame.
+        m.set_focus_lock_filter(
+            id,
+            egui::EventFilter {
+                tab: true,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: true,
+            },
+        );
+    });
+}
+
 fn show_pane(
     ui: &mut egui::Ui,
     id: PaneId,
@@ -556,7 +587,7 @@ mod tests {
             shell: vec!["/bin/sh".into()],
             ..Default::default()
         };
-        let pane = Pane::new(&config, ctx).unwrap();
+        let pane = Pane::new(&config, ctx, None).unwrap();
         App {
             config,
             config_path: PathBuf::new(),

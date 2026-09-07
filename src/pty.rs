@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::{
     io::{Read, Write},
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender, SyncSender},
     thread,
 };
@@ -18,7 +19,7 @@ pub struct Pty {
 }
 
 impl Pty {
-    pub fn spawn(config: &Config, ctx: &egui::Context) -> Result<Self> {
+    pub fn spawn(config: &Config, ctx: &egui::Context, cwd: Option<&Path>) -> Result<Self> {
         let pair = native_pty_system().openpty(PtySize {
             rows: 24,
             cols: 80,
@@ -31,7 +32,7 @@ impl Pty {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "slerm");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        if let Some(dir) = &config.working_directory {
+        if let Some(dir) = cwd.or(config.working_directory.as_deref()) {
             cmd.cwd(dir);
         }
         let mut reader = pair.master.try_clone_reader()?;
@@ -108,6 +109,13 @@ impl Pty {
             shutdown,
             reaper: Some(reaper),
         })
+    }
+
+    /// The working directory of the foreground process group, via /proc. Shells
+    /// that emit OSC 7 are reported by the terminal instead; this covers the rest.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        let pid = self.master.process_group_leader()?;
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
     pub fn resize(&self, cols: u16, rows: u16, cw: u32, ch: u32) -> Result<()> {

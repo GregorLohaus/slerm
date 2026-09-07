@@ -11,7 +11,12 @@ use libghostty_vt::{
     selection::{FormatOptions, Selection},
     terminal::{self, Mode, Point, PointCoordinate, ScrollViewport},
 };
-use std::{cell::RefCell, rc::Rc, sync::mpsc::TryRecvError};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::mpsc::TryRecvError,
+};
 
 pub struct Pane {
     pub terminal: Terminal<'static, 'static>,
@@ -27,6 +32,47 @@ pub struct Pane {
     mouse_event: mouse::Event<'static>,
     selection_start: Option<PointCoordinate>,
     focused: bool,
+}
+
+/// OSC 7 carries a `file://host/path` URL. Only a directory on this machine can be
+/// handed to a new shell, so a remote host (an SSH session, say) is rejected here
+/// and the caller falls back to the local process.
+fn local_pwd(pwd: &str) -> Option<PathBuf> {
+    if pwd.is_empty() {
+        return None;
+    }
+    // Some shells emit a bare path instead of a URL.
+    let Some(rest) = pwd.strip_prefix("file://") else {
+        return pwd.starts_with('/').then(|| PathBuf::from(pwd));
+    };
+    let (host, path) = rest.split_once('/')?;
+    let local = host.is_empty()
+        || host.eq_ignore_ascii_case("localhost")
+        || std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .is_ok_and(|name| name.trim().eq_ignore_ascii_case(host));
+    local.then(|| PathBuf::from(percent_decode(&format!("/{path}"))))
+}
+
+fn percent_decode(path: &str) -> String {
+    let mut out = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        let decoded = (byte == b'%')
+            .then(|| {
+                let hex = [bytes.clone().next()?, bytes.clone().nth(1)?];
+                let hex = std::str::from_utf8(&hex).ok()?;
+                u8::from_str_radix(hex, 16).ok()
+            })
+            .flatten();
+        match decoded {
+            Some(value) => {
+                bytes.nth(1);
+                out.push(value);
+            }
+            None => out.push(byte),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub fn terminal(config: &Config) -> Result<Terminal<'static, 'static>> {
@@ -68,12 +114,12 @@ pub fn apply_config(term: &mut Terminal<'_, '_>, config: &Config) -> Result<()> 
 }
 
 impl Pane {
-    pub fn new(config: &Config, ctx: &egui::Context) -> Result<Self> {
+    pub fn new(config: &Config, ctx: &egui::Context, cwd: Option<&Path>) -> Result<Self> {
         let mut terminal = terminal(config)?;
         let renderer = Renderer::new()?;
         let mouse_encoder = mouse::Encoder::new()?;
         let mouse_event = mouse::Event::new()?;
-        let pty = Pty::spawn(config, ctx)?;
+        let pty = Pty::spawn(config, ctx, cwd)?;
         let input = pty.input.clone();
         let callback_error = Rc::new(RefCell::new(None));
         let errors = callback_error.clone();
@@ -168,6 +214,17 @@ impl Pane {
             .terminal
             .format_selection_alloc(None, FormatOptions::new().with_trim(true).with_unwrap(true))?
             .map(|b| String::from_utf8_lossy(&b).into_owned()))
+    }
+
+    /// Where a pane spawned from this one should start: the directory the shell
+    /// reports through OSC 7, or the foreground process group's own directory.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        self.terminal
+            .pwd()
+            .ok()
+            .and_then(local_pwd)
+            .or_else(|| self.pty.cwd())
+            .filter(|path| path.is_dir())
     }
 
     pub fn focus(&mut self, focused: bool) -> Result<()> {

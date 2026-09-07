@@ -173,7 +173,7 @@ fn pty_executes_input_and_bracketed_paste_is_sanitized() {
         ..Default::default()
     };
     let ctx = egui::Context::default();
-    let mut pane = pane::Pane::new(&config, &ctx).unwrap();
+    let mut pane = pane::Pane::new(&config, &ctx, None).unwrap();
     pane.send(b"printf '\\033[31mpty-%s\\033[0m\\n' 'success'\r".to_vec())
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -204,4 +204,65 @@ fn pty_executes_input_and_bracketed_paste_is_sanitized() {
     }
     assert!(pane.dead);
     assert!(pane.send(b"after exit".to_vec()).is_err());
+}
+
+#[test]
+fn new_panes_start_in_the_directory_of_the_pane_they_came_from() {
+    let config = Config {
+        shell: vec!["/bin/sh".into()],
+        ..Default::default()
+    };
+    let ctx = egui::Context::default();
+    let dir = std::env::temp_dir().join(format!("slerm cwd {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let mut pane = pane::Pane::new(&config, &ctx, None).unwrap();
+    pane.send(format!("cd '{}'\r", dir.display()).into_bytes())
+        .unwrap();
+    // /bin/sh reports no OSC 7, so the directory has to come from the process.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pane.cwd().as_deref() != Some(dir.as_path()) && Instant::now() < deadline {
+        pane.drain(&ctx);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(pane.cwd().as_deref(), Some(dir.as_path()));
+
+    let mut child = pane::Pane::new(&config, &ctx, pane.cwd().as_deref()).unwrap();
+    child
+        .send(b"printf 'at:%s\\n' \"$PWD\"\r".to_vec())
+        .unwrap();
+    let expected = format!("at:{}", dir.display());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !plain(&child.terminal).contains(&expected) && Instant::now() < deadline {
+        child.drain(&ctx);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(plain(&child.terminal).contains(&expected));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn osc7_wins_over_the_process_directory_but_only_for_this_machine() {
+    let config = Config {
+        shell: vec!["/bin/sh".into()],
+        ..Default::default()
+    };
+    let ctx = egui::Context::default();
+    let reported = std::env::temp_dir().join(format!("slerm osc7 {}", std::process::id()));
+    std::fs::create_dir_all(&reported).unwrap();
+    let reported = reported.canonicalize().unwrap();
+    let mut pane = pane::Pane::new(&config, &ctx, None).unwrap();
+    let process_cwd = pane.cwd().unwrap();
+    assert_ne!(process_cwd, reported);
+
+    let escaped = reported.display().to_string().replace(' ', "%20");
+    pane.terminal
+        .vt_write(format!("\x1b]7;file://localhost{escaped}\x1b\\").as_bytes());
+    assert_eq!(pane.cwd(), Some(reported.clone()));
+
+    // A directory on another host cannot be entered here, so the process wins again.
+    pane.terminal
+        .vt_write(format!("\x1b]7;file://elsewhere{escaped}\x1b\\").as_bytes());
+    assert_eq!(pane.cwd(), Some(process_cwd));
+    std::fs::remove_dir_all(&reported).unwrap();
 }
