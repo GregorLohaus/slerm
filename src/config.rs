@@ -40,6 +40,8 @@ pub struct Multiplexer {
     pub max_panes: usize,
     pub floating_width: f32,
     pub floating_height: f32,
+    pub floating_max_width: f32,
+    pub floating_max_height: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -83,6 +85,10 @@ impl Default for Multiplexer {
             max_panes: 32,
             floating_width: 0.65,
             floating_height: 0.65,
+            // The fractions alone make a float fill half of a large display, which is
+            // far more than a scratch terminal needs, so cap them in points too.
+            floating_max_width: 960.0,
+            floating_max_height: 640.0,
         }
     }
 }
@@ -179,6 +185,15 @@ impl Config {
             ensure!(
                 (0.2..=0.95).contains(&fraction),
                 "floating dimensions must be fractions in 0.2..0.95"
+            );
+        }
+        for points in [
+            config.multiplexer.floating_max_width,
+            config.multiplexer.floating_max_height,
+        ] {
+            ensure!(
+                (160.0..=16384.0).contains(&points),
+                "floating maximums must be 160..16384 points"
             );
         }
         for color in [&config.background, &config.foreground, &config.accent] {

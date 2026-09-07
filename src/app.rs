@@ -432,25 +432,17 @@ impl eframe::App for App {
                 }
             });
         if tab.floats_visible && !tab.zoomed {
-            for id in tab.floats.clone() {
+            for (index, id) in tab.floats.clone().into_iter().enumerate() {
                 let pane = self.panes.get_mut(&id).unwrap();
                 let window_id = egui::Id::new(("float", tab.id, id));
                 let active = tab.active == id;
+                let (pos, size) = float_placement(workspace, index, &self.config.multiplexer);
                 let result = egui::Window::new(pane_title(id, pane))
                     .id(window_id)
                     .title_bar(false)
                     .constrain_to(workspace)
-                    .default_pos(
-                        workspace.min
-                            + vec2(40.0 + (id % 5) as f32 * 22.0, 40.0 + (id % 5) as f32 * 22.0),
-                    )
-                    .default_size(
-                        workspace.size()
-                            * vec2(
-                                self.config.multiplexer.floating_width,
-                                self.config.multiplexer.floating_height,
-                            ),
-                    )
+                    .default_pos(pos)
+                    .default_size(size)
                     .min_size(vec2(160.0, 100.0))
                     .frame(egui::Frame::NONE.fill(bg))
                     .show(ctx, |ui| {
@@ -569,6 +561,23 @@ fn show_pane(
     focused
 }
 
+/// Where a floating pane opens, from its place in the tab's float list rather than
+/// its pane id: the first one is centred and every later one steps down and right
+/// from it, so the same slot always lands in the same spot. The cascade wraps
+/// before it can walk a float off the far edge.
+fn float_placement(
+    workspace: Rect,
+    index: usize,
+    config: &config::Multiplexer,
+) -> (egui::Pos2, egui::Vec2) {
+    // The fractions are of the workspace, so on a large display they hand a scratch
+    // terminal far more room than it needs; the maximums keep it in hand.
+    let size = (workspace.size() * vec2(config.floating_width, config.floating_height))
+        .min(vec2(config.floating_max_width, config.floating_max_height));
+    let step = (index % 6) as f32 * 28.0;
+    (workspace.center() - size / 2.0 + vec2(step, step), size)
+}
+
 fn pane_title(id: PaneId, pane: &Pane) -> String {
     let title = pane.terminal.title().unwrap_or("");
     format!(
@@ -638,6 +647,41 @@ mod tests {
             sizes.iter().all(|size| *size == sizes[0]),
             "floating pane grew: {sizes:?}"
         );
+    }
+
+    #[test]
+    fn floats_open_centered_then_cascade_and_stay_within_the_maximums() {
+        let config = config::Multiplexer::default();
+        let workspace = Rect::from_min_size(egui::pos2(0.0, 30.0), vec2(3000.0, 1800.0));
+        let (first, size) = float_placement(workspace, 0, &config);
+        assert_eq!(
+            size,
+            vec2(config.floating_max_width, config.floating_max_height),
+            "a large workspace must not hand out a proportionally large float"
+        );
+        assert_eq!(
+            first + size / 2.0,
+            workspace.center(),
+            "the first is centered"
+        );
+
+        let (second, _) = float_placement(workspace, 1, &config);
+        assert!(
+            second.x > first.x && second.y > first.y,
+            "later floats step off it"
+        );
+        // Six slots later the cascade is back where it started, so it cannot walk away.
+        assert_eq!(float_placement(workspace, 6, &config).0, first);
+        assert_eq!(float_placement(workspace, 7, &config).0, second);
+
+        // A small workspace keeps the fractions instead of the maximums.
+        let small = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0));
+        let (pos, size) = float_placement(small, 0, &config);
+        assert_eq!(
+            size,
+            small.size() * vec2(config.floating_width, config.floating_height)
+        );
+        assert_eq!(pos + size / 2.0, small.center());
     }
 
     #[test]
