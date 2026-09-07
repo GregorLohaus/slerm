@@ -1,0 +1,606 @@
+use crate::{
+    config::{self, Action, Config},
+    input,
+    layout::{Axis, Direction, Layout, PaneId, Tab},
+    pane::{self, Pane},
+    render::color,
+};
+use anyhow::{Result, ensure};
+use egui::{Color32, Rect, Stroke, vec2};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
+
+pub struct App {
+    config: Config,
+    config_path: PathBuf,
+    panes: BTreeMap<PaneId, Pane>,
+    tabs: Vec<Tab>,
+    current: usize,
+    next_id: u64,
+    error: Option<String>,
+    suppressed: HashSet<egui::Key>,
+}
+
+pub fn fonts(config: &Config) -> Result<egui::FontDefinitions> {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(path) = &config.font_path {
+        let data = std::fs::read(path)?;
+        fonts
+            .font_data
+            .insert("terminal".into(), egui::FontData::from_owned(data).into());
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Monospace)
+            .unwrap()
+            .insert(0, "terminal".into());
+    }
+    Ok(fonts)
+}
+
+impl App {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        config: Config,
+        config_path: PathBuf,
+    ) -> Result<Self> {
+        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        cc.egui_ctx.set_fonts(fonts(&config)?);
+        let pane = Pane::new(&config, &cc.egui_ctx)?;
+        Ok(Self {
+            config,
+            config_path,
+            panes: BTreeMap::from([(1, pane)]),
+            tabs: vec![Tab::new(1, 1)],
+            current: 0,
+            next_id: 2,
+            error: None,
+            suppressed: HashSet::new(),
+        })
+    }
+
+    fn spawn(&mut self, ctx: &egui::Context) -> Result<PaneId> {
+        ensure!(
+            self.panes.len() < self.config.multiplexer.max_panes,
+            "Pane limit reached"
+        );
+        let pane = Pane::new(&self.config, ctx)?;
+        let id = self.next_id;
+        self.next_id += 1;
+        self.panes.insert(id, pane);
+        Ok(id)
+    }
+
+    fn action(&mut self, action: Action, ctx: &egui::Context) -> Result<()> {
+        let active = self.tabs[self.current].active;
+        match action {
+            Action::NewPane => {
+                let action = if self.tabs[self.current].floats_visible {
+                    Action::NewFloating
+                } else {
+                    let rect = self.panes[&active].last_rect;
+                    if rect.is_positive() && rect.height() > rect.width() {
+                        Action::SplitDown
+                    } else {
+                        Action::SplitRight
+                    }
+                };
+                self.action(action, ctx)?;
+            }
+            Action::SplitRight | Action::SplitDown => {
+                let id = self.spawn(ctx)?;
+                let tab = &mut self.tabs[self.current];
+                let axis = if action == Action::SplitRight {
+                    Axis::Horizontal
+                } else {
+                    Axis::Vertical
+                };
+                if let Some(root) = &mut tab.root {
+                    root.split(
+                        if tab.floats.contains(&active) {
+                            root.first()
+                        } else {
+                            active
+                        },
+                        id,
+                        axis,
+                    );
+                } else {
+                    tab.root = Some(Layout::Pane(id));
+                }
+                tab.active = id;
+                tab.zoomed = false;
+            }
+            Action::NewFloating => {
+                let id = self.spawn(ctx)?;
+                let tab = &mut self.tabs[self.current];
+                tab.floats.push(id);
+                tab.active = id;
+                tab.floats_visible = true;
+                tab.zoomed = false;
+            }
+            Action::ToggleFloating => {
+                let tab = &mut self.tabs[self.current];
+                let was_floating = tab.floats.contains(&active);
+                tab.detach(active);
+                if was_floating {
+                    if let Some(root) = &mut tab.root {
+                        root.split(root.first(), active, Axis::Horizontal);
+                    } else {
+                        tab.root = Some(Layout::Pane(active));
+                    }
+                } else {
+                    tab.floats.push(active);
+                    tab.floats_visible = true;
+                }
+            }
+            Action::ToggleFloats => {
+                if self.tabs[self.current].floats.is_empty() {
+                    self.action(Action::NewFloating, ctx)?;
+                } else {
+                    self.tabs[self.current].toggle_floats();
+                }
+            }
+            Action::FocusLeft | Action::FocusDown | Action::FocusUp | Action::FocusRight => {
+                let direction = match action {
+                    Action::FocusLeft => Direction::Left,
+                    Action::FocusDown => Direction::Down,
+                    Action::FocusUp => Direction::Up,
+                    _ => Direction::Right,
+                };
+                let rects = self
+                    .panes
+                    .iter()
+                    .map(|(id, pane)| (*id, pane.last_rect))
+                    .collect::<Vec<_>>();
+                self.tabs[self.current].focus_direction(direction, &rects);
+            }
+            Action::NextPane | Action::PreviousPane => {
+                self.tabs[self.current].cycle(action == Action::PreviousPane)
+            }
+            Action::ClosePane => self.close(active, ctx),
+            Action::ZoomPane => {
+                let tab = &mut self.tabs[self.current];
+                if tab.is_visible(tab.active) {
+                    tab.zoomed = !tab.zoomed;
+                }
+            }
+            Action::NewTab => {
+                let id = self.spawn(ctx)?;
+                self.tabs.push(Tab::new(id, id));
+                self.current = self.tabs.len() - 1;
+            }
+            Action::NextTab => self.current = (self.current + 1) % self.tabs.len(),
+            Action::PreviousTab => {
+                self.current = (self.current + self.tabs.len() - 1) % self.tabs.len()
+            }
+            Action::ReloadConfig => {
+                let config = Config::load(&self.config_path)?;
+                let fonts = fonts(&config)?;
+                for pane in self.panes.values_mut() {
+                    pane::apply_config(&mut pane.terminal, &config)?;
+                }
+                ctx.set_fonts(fonts);
+                self.config = config;
+            }
+            Action::Copy => {
+                if let Some(text) = self.panes[&active].copy()? {
+                    ctx.copy_text(text);
+                }
+            }
+            Action::Paste => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, id: PaneId, ctx: &egui::Context) {
+        self.panes.remove(&id);
+        for tab in &mut self.tabs {
+            if !tab.ids().contains(&id) {
+                continue;
+            }
+            tab.detach(id);
+            if tab.active == id
+                && let Some(next) = tab.ids().first()
+            {
+                tab.active = *next;
+            }
+            if tab.root.is_none() {
+                tab.floats_visible = true;
+            }
+        }
+        self.tabs.retain(|t| !t.ids().is_empty());
+        self.current = self.current.min(self.tabs.len().saturating_sub(1));
+        if self.tabs.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn keyboard(&mut self, ctx: &egui::Context) -> Result<()> {
+        let events = ctx.input(|i| i.events.clone());
+        let modifiers = ctx.input(|i| i.modifiers);
+        let mut terminal_events = vec![];
+        let mut suppress_text = false;
+        for event in events {
+            if let egui::Event::Key {
+                key,
+                pressed,
+                repeat,
+                modifiers,
+                ..
+            } = &event
+            {
+                suppress_text = false;
+                if !pressed && self.suppressed.remove(key) {
+                    continue;
+                }
+                let action = self.config.keys.iter().find_map(|(s, a)| {
+                    let shortcut = config::shortcut(s).ok()?;
+                    let m = shortcut.modifiers;
+                    (shortcut.logical_key == *key
+                        && m.ctrl == modifiers.ctrl
+                        && m.shift == modifiers.shift
+                        && m.alt == modifiers.alt
+                        && m.mac_cmd == modifiers.mac_cmd)
+                        .then_some(*a)
+                });
+                if *pressed && let Some(action) = action {
+                    self.flush_keys(&mut terminal_events)?;
+                    self.suppressed.insert(*key);
+                    suppress_text = true;
+                    if !repeat {
+                        self.action(action, ctx)?;
+                    }
+                    if self.tabs.is_empty() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            if suppress_text && matches!(event, egui::Event::Text(_)) {
+                continue;
+            }
+            let active = self.tabs[self.current].active;
+            if !self.tabs[self.current].is_visible(active) {
+                continue;
+            }
+            match event {
+                egui::Event::Paste(text) => {
+                    self.flush_keys(&mut terminal_events)?;
+                    self.panes.get_mut(&active).unwrap().paste(&text)?;
+                }
+                egui::Event::Copy => {
+                    self.flush_keys(&mut terminal_events)?;
+                    if modifiers.shift || modifiers.mac_cmd {
+                        self.action(Action::Copy, ctx)?;
+                    } else {
+                        self.panes.get_mut(&active).unwrap().send(vec![3])?;
+                    }
+                }
+                egui::Event::Cut => {
+                    self.flush_keys(&mut terminal_events)?;
+                    self.panes.get_mut(&active).unwrap().send(vec![24])?;
+                }
+                other => terminal_events.push(other),
+            }
+        }
+        self.flush_keys(&mut terminal_events)
+    }
+
+    fn flush_keys(&mut self, events: &mut Vec<egui::Event>) -> Result<()> {
+        let active = self.tabs[self.current].active;
+        if !self.tabs[self.current].is_visible(active) {
+            events.clear();
+            return Ok(());
+        }
+        let pane = self.panes.get_mut(&active).unwrap();
+        let encoded = input::encode(&pane.terminal, events)?;
+        pane.send(encoded)?;
+        events.clear();
+        Ok(())
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        for pane in self.panes.values_mut() {
+            pane.drain(ctx);
+        }
+        if let Err(e) = self.keyboard(ctx) {
+            self.error = Some(e.to_string());
+        }
+        if self.tabs.is_empty() {
+            return;
+        }
+        let mut action = None;
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (index, tab) in self.tabs.iter().enumerate() {
+                    let title = self.panes[&tab.active].terminal.title().unwrap_or("");
+                    let label = if title.is_empty() {
+                        format!("{}: shell", index + 1)
+                    } else {
+                        format!(
+                            "{}: {}",
+                            index + 1,
+                            title.chars().take(28).collect::<String>()
+                        )
+                    };
+                    if ui.selectable_label(self.current == index, label).clicked() {
+                        self.current = index;
+                    }
+                }
+                if ui.button("+").on_hover_text("New tab").clicked() {
+                    action = Some(Action::NewTab);
+                }
+                ui.menu_button("Pane", |ui| {
+                    for (label, a) in [
+                        ("New pane", Action::NewPane),
+                        ("Split right", Action::SplitRight),
+                        ("Split down", Action::SplitDown),
+                        ("New floating pane", Action::NewFloating),
+                        ("Float / dock", Action::ToggleFloating),
+                        ("Show / hide floating panes", Action::ToggleFloats),
+                        ("Zoom / restore", Action::ZoomPane),
+                        ("Next pane", Action::NextPane),
+                        ("Close pane", Action::ClosePane),
+                    ] {
+                        if ui.button(label).clicked() {
+                            action = Some(a);
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button("Settings", |ui| {
+                    if ui.button("Reload config").clicked() {
+                        action = Some(Action::ReloadConfig);
+                        ui.close();
+                    }
+                });
+            });
+        });
+        if let Some(error) = self.error.clone() {
+            egui::TopBottomPanel::bottom("error").show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                    if ui.button("Dismiss").clicked() {
+                        self.error = None;
+                    }
+                });
+            });
+        }
+        let bg = color(config::rgb(&self.config.background).unwrap());
+        let tab = &mut self.tabs[self.current];
+        let mut tiled = vec![];
+        let mut workspace = Rect::NOTHING;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(bg))
+            .show(ctx, |ui| {
+                workspace = ui.max_rect();
+                if tab.zoomed {
+                    tiled.push((tab.active, workspace));
+                } else if let Some(root) = &mut tab.root {
+                    root.arrange(ui, workspace, &mut tiled, 1);
+                }
+                for (id, rect) in &tiled {
+                    let pane = self.panes.get_mut(id).unwrap();
+                    let active = tab.active == *id;
+                    if !tab.zoomed {
+                        pane.last_rect = *rect;
+                    }
+                    if show_pane(ui, *id, pane, *rect, &self.config, active) {
+                        tab.active = *id;
+                    }
+                }
+            });
+        if tab.floats_visible && !tab.zoomed {
+            for id in tab.floats.clone() {
+                let pane = self.panes.get_mut(&id).unwrap();
+                let window_id = egui::Id::new(("float", tab.id, id));
+                let active = tab.active == id;
+                let result = egui::Window::new(pane_title(id, pane))
+                    .id(window_id)
+                    .title_bar(false)
+                    .constrain_to(workspace)
+                    .default_pos(
+                        workspace.min
+                            + vec2(40.0 + (id % 5) as f32 * 22.0, 40.0 + (id % 5) as f32 * 22.0),
+                    )
+                    .default_size(
+                        workspace.size()
+                            * vec2(
+                                self.config.multiplexer.floating_width,
+                                self.config.multiplexer.floating_height,
+                            ),
+                    )
+                    .min_size(vec2(160.0, 100.0))
+                    .frame(egui::Frame::NONE.fill(bg))
+                    .show(ctx, |ui| {
+                        let rect = ui.available_rect_before_wrap();
+                        ui.allocate_rect(rect, egui::Sense::hover());
+                        pane.last_rect = rect;
+                        if show_pane(ui, id, pane, rect, &self.config, active) {
+                            tab.active = id;
+                        }
+                    });
+                if let Some(result) = result
+                    && result.response.contains_pointer()
+                    && ctx.input(|i| i.pointer.any_pressed())
+                {
+                    tab.active = id;
+                }
+                if active {
+                    ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, window_id));
+                }
+            }
+        }
+        let active = tab.active;
+        for (id, pane) in &mut self.panes {
+            if let Err(e) =
+                pane.focus(*id == active && tab.is_visible(*id) && ctx.input(|i| i.focused))
+            {
+                pane.error = Some(e.to_string());
+            }
+        }
+        if !self.tabs.is_empty()
+            && let Some(action) = action
+            && let Err(e) = self.action(action, ctx)
+        {
+            self.error = Some(e.to_string());
+        }
+    }
+}
+
+fn show_pane(
+    ui: &mut egui::Ui,
+    id: PaneId,
+    pane: &mut Pane,
+    rect: Rect,
+    config: &Config,
+    active: bool,
+) -> bool {
+    let accent = color(config::rgb(&config.accent).unwrap());
+    let title_rect = Rect::from_min_size(rect.min, vec2(rect.width(), 25.0_f32.min(rect.height())));
+    ui.painter().rect_filled(
+        title_rect,
+        0,
+        Color32::from_gray(if active { 43 } else { 31 }),
+    );
+    ui.painter()
+        .with_clip_rect(title_rect.shrink(3.0).intersect(ui.clip_rect()))
+        .text(
+            title_rect.min + vec2(7.0, 4.0),
+            egui::Align2::LEFT_TOP,
+            pane_title(id, pane),
+            egui::FontId::proportional(13.0),
+            if active { accent } else { Color32::GRAY },
+        );
+    // Click-only leaves dragging to the floating window's existing move handler.
+    let header = ui.interact(
+        title_rect,
+        ui.id().with(("title", id)),
+        egui::Sense::click(),
+    );
+    let mut focused =
+        header.clicked() || (header.contains_pointer() && ui.input(|i| i.pointer.any_pressed()));
+    let content = Rect::from_min_max(egui::pos2(rect.left(), title_rect.bottom()), rect.max);
+    // The pane rectangle is already allocated; a layout scope would grow its parent.
+    let mut content_ui = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(content));
+    content_ui.set_clip_rect(content.intersect(ui.clip_rect()));
+    match pane.show(&mut content_ui, content, config, active) {
+        Ok(clicked) => focused |= clicked,
+        Err(e) => pane.error = Some(e.to_string()),
+    }
+    ui.painter().rect_stroke(
+        rect,
+        0,
+        Stroke::new(
+            1.0,
+            if active {
+                accent
+            } else {
+                Color32::from_gray(54)
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    focused
+}
+
+fn pane_title(id: PaneId, pane: &Pane) -> String {
+    let title = pane.terminal.title().unwrap_or("");
+    format!(
+        "{id}  {}{}",
+        if title.is_empty() { "shell" } else { title },
+        if pane.dead { " [exited]" } else { "" }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app(ctx: &egui::Context) -> App {
+        let config = Config {
+            shell: vec!["/bin/sh".into()],
+            ..Default::default()
+        };
+        let pane = Pane::new(&config, ctx).unwrap();
+        App {
+            config,
+            config_path: PathBuf::new(),
+            panes: BTreeMap::from([(1, pane)]),
+            tabs: vec![Tab::new(1, 1)],
+            current: 0,
+            next_id: 2,
+            error: None,
+            suppressed: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn floating_pane_size_stays_constant_across_frames() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        let mut sizes = vec![];
+        for frame in 0..20 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(frame as f64 / 60.0),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                let window = egui::Window::new("float")
+                    .title_bar(false)
+                    .default_size(vec2(400.0, 240.0))
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        let rect = ui.available_rect_before_wrap();
+                        ui.allocate_rect(rect, egui::Sense::hover());
+                        show_pane(
+                            ui,
+                            1,
+                            app.panes.get_mut(&1).unwrap(),
+                            rect,
+                            &app.config,
+                            true,
+                        );
+                    })
+                    .unwrap();
+                if frame >= 2 {
+                    sizes.push(window.response.rect.size());
+                }
+            });
+        }
+        assert!(
+            sizes.iter().all(|size| *size == sizes[0]),
+            "floating pane grew: {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn toggle_creates_first_float_then_reuses_it_and_close_removes_focus() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        assert_eq!(app.tabs[0].floats, vec![2]);
+        assert_eq!(app.tabs[0].active, 2);
+        assert!(app.tabs[0].floats_visible);
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        assert!(!app.tabs[0].floats_visible);
+        assert_eq!(app.tabs[0].active, 1);
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        assert_eq!(app.panes.len(), 2);
+        assert_eq!(app.tabs[0].active, 2);
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 1);
+        assert!(!app.panes.contains_key(&2));
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        assert_eq!(app.tabs[0].floats, vec![3]);
+        assert!(app.tabs[0].floats_visible);
+    }
+}

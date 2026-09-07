@@ -1,0 +1,40 @@
+# ~/.config/rust-term/config.toml
+# Omit shell to use $SHELL. Arguments are separate array entries.
+# shell = ["/bin/bash", "--login"]
+# working_directory = "/home/you"
+font_path = "/usr/local/share/fonts/MononokiNerdFont-Regular.ttf"
+font_size = 16
+scrollback = 10000
+window_width = 1100
+window_height = 720
+background = "#17191c"
+foreground = "#e2e4e8"
+accent = "#58c4ad"
+
+[kitty]
+image_storage_mb = 64
+allow_file = true
+allow_temp_file = true
+allow_shared_memory = true
+
+[multiplexer]
+max_panes = 32
+floating_width = 0.65
+floating_height = 0.65
+
+# Providing [keys] replaces the entire default map.
+[keys]
+"Alt+F" = "toggle_floats"
+"Alt+M" = "new_pane"
+"Alt+H" = "focus_left"
+"Alt+J" = "focus_down"
+"Alt+K" = "focus_up"
+"Alt+L" = "focus_right"
+"Alt+A" = "new_tab"
+"Alt+Shift+H" = "previous_tab"
+"Alt+Shift+L" = "next_tab"
+"Alt+X" = "close_pane"
+"Ctrl+Shift+Z" = "zoom_pane"
+"Ctrl+Shift+R" = "reload_config"
+"Ctrl+Shift+C" = "copy"
+"Ctrl+Shift+V" = "paste"
