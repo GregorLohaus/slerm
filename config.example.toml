@@ -1,4 +1,4 @@
-# ~/.config/rust-term/config.toml
+# ~/.config/slerm/config.toml
 # Omit shell to use $SHELL. Arguments are separate array entries.
 # shell = ["/bin/bash", "--login"]
 # working_directory = "/home/you"

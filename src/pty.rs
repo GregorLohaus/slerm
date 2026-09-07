@@ -29,7 +29,7 @@ impl Pty {
         cmd.args(&config.shell[1..]);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "rust-term");
+        cmd.env("TERM_PROGRAM", "slerm");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         if let Some(dir) = &config.working_directory {
             cmd.cwd(dir);

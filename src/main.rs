@@ -21,12 +21,12 @@ fn main() -> Result<()> {
             "--check-config" => check = true,
             "--init-config" => init = true,
             "--version" => {
-                println!("rust-term {}", env!("CARGO_PKG_VERSION"));
+                println!("slerm {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--help" | "-h" => {
                 println!(
-                    "rust-term [--config PATH] [--check-config | --init-config]\n\nDefault config: {}",
+                    "slerm [--config PATH] [--check-config | --init-config]\n\nDefault config: {}",
                     path.display()
                 );
                 return Ok(());
@@ -69,17 +69,17 @@ fn main() -> Result<()> {
     libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(render::PngDecoder)))?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("rust-term")
+            .with_title("slerm")
             .with_inner_size([config.window_width, config.window_height])
             .with_min_inner_size([320.0, 200.0])
-            .with_app_id("rust-term"),
+            .with_app_id("slerm"),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(
-        "rust-term",
+        "slerm",
         options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, config, path)?))),
     )
-    .map_err(|e| anyhow::anyhow!("Cannot start rust-term: {e}"))
+    .map_err(|e| anyhow::anyhow!("Cannot start slerm: {e}"))
 }

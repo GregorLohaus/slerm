@@ -590,7 +590,7 @@ mod tests {
     #[ignore = "manual CPU rendering benchmark"]
     fn renderer_frame_cost() {
         let config = crate::config::Config {
-            font_path: std::env::var_os("RUST_TERM_TEST_FONT").map(Into::into),
+            font_path: std::env::var_os("SLERM_TEST_FONT").map(Into::into),
             ..Default::default()
         };
         let ctx = egui::Context::default();
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn terminal_cells_match_font_line_metrics() {
         let config = crate::config::Config {
-            font_path: std::env::var_os("RUST_TERM_TEST_FONT").map(Into::into),
+            font_path: std::env::var_os("SLERM_TEST_FONT").map(Into::into),
             ..Default::default()
         };
         for scale in [1.0, 1.5, 2.0] {

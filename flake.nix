@@ -1,5 +1,5 @@
 {
-  description = "Ghostty-powered Rust terminal";
+  description = "slerm: a Ghostty-powered Rust terminal";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -38,7 +38,7 @@
             exec ${lib.getExe zig} "$@"
           '';
           ghosttyDeps = pkgs.callPackage "${ghostty-src}/build.zig.zon.nix" {
-            name = "rust-term-ghostty-zig-deps";
+            name = "slerm-ghostty-zig-deps";
             zig_0_15 = zig;
             # Zig 0.15's build runner needs real directories, not a symlink farm.
             linkFarm =
@@ -65,12 +65,25 @@
               vulkan-loader
             ]
           );
+          # wgpu dlopens the Vulkan loader and libEGL by soname, and those in turn
+          # dlopen the GPU vendor driver named in the ICD/vendor JSON. Nixpkgs' own
+          # store paths cover the loaders but never the driver, which lives outside
+          # /nix/store: under /run/opengl-driver on NixOS, under the distro's library
+          # directory everywhere else. Without these the loader finds zero drivers and
+          # wgpu reports "Failed to create surface for any enabled backend: {}".
+          # They go last so /nix/store still wins for everything else.
+          driverLibraries = [
+            "/run/opengl-driver/lib"
+            "/usr/lib/${pkgs.stdenv.hostPlatform.parsed.cpu.name}-linux-gnu"
+            "/usr/lib64"
+            "/usr/lib"
+          ];
           ghosttyEnv = {
             GHOSTTY_SOURCE_DIR = "${ghostty-src}";
             GHOSTTY_ZIG_SYSTEM_DIR = "${ghosttyDeps}";
             LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast";
           };
-          rustTerm = pkgs.rustPlatform.buildRustPackage (
+          slerm = pkgs.rustPlatform.buildRustPackage (
             {
               pname = manifest.package.name;
               version = manifest.package.version;
@@ -115,14 +128,15 @@
               ];
 
               postFixup = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                wrapProgram "$out/bin/rust-term" \
-                  --suffix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibraries}
+                wrapProgram "$out/bin/slerm" \
+                  --suffix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibraries} \
+                  --suffix LD_LIBRARY_PATH : ${lib.concatStringsSep ":" driverLibraries}
               '';
 
               meta = {
                 description = manifest.package.description;
                 license = lib.licenses.mit;
-                mainProgram = "rust-term";
+                mainProgram = "slerm";
                 platforms = systems;
               };
             }
@@ -131,12 +145,12 @@
         in
         {
           packages = {
-            default = rustTerm;
-            rust-term = rustTerm;
+            default = slerm;
+            slerm = slerm;
           };
           devShells.default = pkgs.mkShell (
             {
-              inputsFrom = [ rustTerm ];
+              inputsFrom = [ slerm ];
               packages = [
                 pkgs.cargo
                 pkgs.rustc
@@ -147,7 +161,7 @@
               shellHook = ''
                 export ZIG_GLOBAL_CACHE_DIR="$PWD/target/zig-global-cache"
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                  export LD_LIBRARY_PATH="${lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                  export LD_LIBRARY_PATH="${lib.makeLibraryPath runtimeLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:${lib.concatStringsSep ":" driverLibraries}"
                 ''}
               '';
             }
@@ -162,8 +176,8 @@
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/rust-term";
-          meta.description = "Run rust-term";
+          program = "${self.packages.${system}.default}/bin/slerm";
+          meta.description = "Run slerm";
         };
       });
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);

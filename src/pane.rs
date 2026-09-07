@@ -37,7 +37,7 @@ pub fn terminal(config: &Config) -> Result<Terminal<'static, 'static>> {
     })?;
     term.resize(80, 24, 8, 16)?;
     apply_config(&mut term, config)?;
-    term.on_xtversion(|_| Some("rust-term 0.1.0"))?;
+    term.on_xtversion(|_| Some(concat!("slerm ", env!("CARGO_PKG_VERSION"))))?;
     term.on_device_attributes(|_| {
         Some(terminal::DeviceAttributes {
             primary: terminal::PrimaryDeviceAttributes::new(

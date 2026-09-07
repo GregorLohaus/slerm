@@ -127,11 +127,11 @@ impl Default for Config {
 impl Config {
     pub fn path() -> Result<PathBuf> {
         if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()) {
-            return Ok(PathBuf::from(dir).join("rust-term/config.toml"));
+            return Ok(PathBuf::from(dir).join("slerm/config.toml"));
         }
         Ok(
             PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
-                .join(".config/rust-term/config.toml"),
+                .join(".config/slerm/config.toml"),
         )
     }
 
