@@ -33,11 +33,16 @@ pub fn color(c: RgbColor) -> Color32 {
 }
 
 pub fn cell_size(painter: &Painter, font: &FontId) -> egui::Vec2 {
+    let pixels_per_point = painter.ctx().pixels_per_point();
     painter.ctx().fonts_mut(|fonts| {
-        vec2(
-            fonts.glyph_width(font, 'M').ceil().max(1.0),
-            fonts.row_height(font).ceil().max(1.0),
-        )
+        // Cached glyphs are rasterized at x=0 and egui snaps their positions to
+        // physical pixels. Use a whole-pixel column pitch so that snapping
+        // cannot periodically insert an extra pixel between columns. Round
+        // down to avoid spacing wider than the font's advance.
+        let width_px = (fonts.glyph_width(font, 'M') * pixels_per_point)
+            .floor()
+            .max(1.0);
+        vec2(width_px / pixels_per_point, fonts.row_height(font).max(1.0))
     })
 }
 
@@ -899,15 +904,30 @@ mod tests {
             ctx.set_fonts(crate::app::fonts(&config).unwrap());
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 let painter = ctx.layer_painter(egui::LayerId::background());
-                for size in [12.0, 16.0, 20.0, 24.0] {
+                for size in [12.0, 13.0, 14.5, 16.0, 17.0, 20.0, 24.0] {
                     let font = FontId::monospace(size);
                     let cell = cell_size(&painter, &font);
                     let line_height = ctx.fonts_mut(|fonts| fonts.row_height(&font));
-                    assert_eq!(
-                        cell.y,
-                        line_height.ceil(),
-                        "font size {size}, scale {scale}"
+                    assert_eq!(cell.y, line_height, "font size {size}, scale {scale}");
+                    // The pitch must fit within the glyph advance and differ
+                    // by less than one physical pixel.
+                    let row = painter.layout_no_wrap("M".repeat(80), font.clone(), Color32::WHITE);
+                    let advance: f32 = row.rows[0].glyphs.iter().map(|g| g.advance_width).sum();
+                    assert!(
+                        advance - 80.0 * cell.x >= -0.01 && advance - 80.0 * cell.x < 80.0 / scale,
+                        "grid width {} vs glyph advances {advance}, size {size}, scale {scale}",
+                        80.0 * cell.x
                     );
+                    // Check the positions egui will actually use, including a
+                    // pane origin that falls between physical pixels.
+                    let pitch = cell.x * scale;
+                    for origin in [0.0, 0.37, 12.25] {
+                        for column in 0..80 {
+                            let left = ((origin + column as f32 * cell.x) * scale).round();
+                            let right = ((origin + (column + 1) as f32 * cell.x) * scale).round();
+                            assert!((right - left - pitch).abs() < 0.001);
+                        }
+                    }
                     let text = painter.layout_no_wrap("NOR Android".into(), font, Color32::WHITE);
                     assert!(
                         (cell.y - text.size().y).abs() <= 1.0,
