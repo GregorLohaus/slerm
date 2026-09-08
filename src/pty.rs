@@ -111,11 +111,10 @@ impl Pty {
         })
     }
 
-    /// The working directory of the foreground process group, via /proc. Shells
-    /// that emit OSC 7 are reported by the terminal instead; this covers the rest.
+    /// The working directory of the foreground process group. Shells that emit
+    /// OSC 7 are reported by the terminal instead; this covers the rest.
     pub fn cwd(&self) -> Option<PathBuf> {
-        let pid = self.master.process_group_leader()?;
-        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+        process_cwd(self.master.process_group_leader()?)
     }
 
     pub fn resize(&self, cols: u16, rows: u16, cw: u32, ch: u32) -> Result<()> {
@@ -127,6 +126,72 @@ impl Pty {
         })?;
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: i32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+/// macOS has no /proc, so the current directory comes from `proc_pidinfo`.
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: i32) -> Option<PathBuf> {
+    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+
+    // <sys/proc_info.h>. `vinfo_stat` is spelled as its 136 bytes of padding
+    // because only the path that follows it is of interest here.
+    #[repr(C)]
+    struct VnodeInfo {
+        stat: [u64; 17],
+        vtype: i32,
+        pad: i32,
+        fsid: [i32; 2],
+    }
+    #[repr(C)]
+    struct VnodeInfoPath {
+        info: VnodeInfo,
+        path: [std::ffi::c_char; 1024],
+    }
+    #[repr(C)]
+    struct VnodePathInfo {
+        cdir: VnodeInfoPath,
+        rdir: VnodeInfoPath,
+    }
+    const PROC_PIDVNODEPATHINFO: i32 = 9;
+
+    unsafe extern "C" {
+        fn proc_pidinfo(
+            pid: i32,
+            flavor: i32,
+            arg: u64,
+            buffer: *mut std::ffi::c_void,
+            buffersize: i32,
+        ) -> i32;
+    }
+
+    let size = size_of::<VnodePathInfo>();
+    // SAFETY: the call writes at most `size` bytes into `info`, and reports how
+    // many it wrote. A short write leaves the path unset, so it is rejected.
+    unsafe {
+        let mut info = std::mem::zeroed::<VnodePathInfo>();
+        let written = proc_pidinfo(
+            pid,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast(),
+            size as i32,
+        );
+        if written < size as i32 {
+            return None;
+        }
+        let path = CStr::from_ptr(info.cdir.path.as_ptr());
+        (!path.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_cwd(_pid: i32) -> Option<PathBuf> {
+    None
 }
 
 impl Drop for Pty {

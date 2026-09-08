@@ -46,11 +46,27 @@ fn local_pwd(pwd: &str) -> Option<PathBuf> {
         return pwd.starts_with('/').then(|| PathBuf::from(pwd));
     };
     let (host, path) = rest.split_once('/')?;
+    // A shell may report either the short name or the FQDN, so compare the leading
+    // label of each.
+    let short = |name: &str| name.split('.').next().unwrap_or(name).to_ascii_lowercase();
     let local = host.is_empty()
         || host.eq_ignore_ascii_case("localhost")
-        || std::fs::read_to_string("/proc/sys/kernel/hostname")
-            .is_ok_and(|name| name.trim().eq_ignore_ascii_case(host));
+        || hostname().is_some_and(|name| short(&name) == short(host));
     local.then(|| PathBuf::from(percent_decode(&format!("/{path}"))))
+}
+
+fn hostname() -> Option<String> {
+    unsafe extern "C" {
+        fn gethostname(name: *mut std::ffi::c_char, len: usize) -> std::ffi::c_int;
+    }
+    let mut buf = [0u8; 256];
+    // SAFETY: at most `len` bytes are written, leaving the final byte of `buf` as
+    // the terminator even when the name is truncated.
+    if unsafe { gethostname(buf.as_mut_ptr().cast(), buf.len() - 1) } != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    String::from_utf8(buf[..end].to_vec()).ok()
 }
 
 fn percent_decode(path: &str) -> String {

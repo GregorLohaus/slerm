@@ -6,7 +6,7 @@ use crate::{
     render::color,
 };
 use anyhow::{Result, ensure};
-use egui::{Color32, Rect, Stroke, vec2};
+use egui::{Color32, CornerRadius, Rect, Stroke, vec2};
 use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
@@ -543,6 +543,9 @@ fn grab_keys(ctx: &egui::Context) {
     });
 }
 
+/// Corner rounding shared by a pane's border and its title bar.
+const CORNER: u8 = 5;
+
 fn show_pane(
     ui: &mut egui::Ui,
     id: PaneId,
@@ -553,9 +556,21 @@ fn show_pane(
 ) -> bool {
     let accent = color(config::rgb(&config.accent).unwrap());
     let title_rect = Rect::from_min_size(rect.min, vec2(rect.width(), 25.0_f32.min(rect.height())));
+    // The title bar only rounds off the top of the pane, unless the pane is so
+    // short that the bar is all there is of it.
+    let bottom = if title_rect.height() < rect.height() {
+        0
+    } else {
+        CORNER
+    };
     ui.painter().rect_filled(
         title_rect,
-        0,
+        CornerRadius {
+            nw: CORNER,
+            ne: CORNER,
+            sw: bottom,
+            se: bottom,
+        },
         Color32::from_gray(if active { 43 } else { 31 }),
     );
     ui.painter()
@@ -585,7 +600,7 @@ fn show_pane(
     }
     ui.painter().rect_stroke(
         rect,
-        0,
+        CORNER,
         Stroke::new(
             1.0_f32,
             if active {
