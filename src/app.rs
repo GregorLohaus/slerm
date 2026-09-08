@@ -55,19 +55,7 @@ fn drag_window(ui: &mut egui::Ui) {
 }
 
 pub fn fonts(config: &Config) -> Result<egui::FontDefinitions> {
-    let mut fonts = egui::FontDefinitions::default();
-    if let Some(path) = &config.font_path {
-        let data = std::fs::read(path)?;
-        fonts
-            .font_data
-            .insert("terminal".into(), egui::FontData::from_owned(data).into());
-        fonts
-            .families
-            .get_mut(&egui::FontFamily::Monospace)
-            .unwrap()
-            .insert(0, "terminal".into());
-    }
-    Ok(fonts)
+    crate::fonts::load(config)
 }
 
 impl App {
