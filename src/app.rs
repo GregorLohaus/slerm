@@ -23,6 +23,37 @@ pub struct App {
     suppressed: HashSet<egui::Key>,
 }
 
+/// Width kept free at the left of the tab bar for the macOS traffic lights,
+/// which float over the content once the titlebar is hidden.
+const TITLEBAR_INSET: f32 = 70.0;
+/// Height the tab bar needs so the traffic lights fit inside it.
+const TITLEBAR_HEIGHT: f32 = 28.0;
+
+/// With the titlebar hidden the tab bar takes its place, so let the empty space
+/// beside the tabs drag the window and double-click to zoom, like a titlebar.
+fn drag_window(ui: &mut egui::Ui) {
+    let used = ui.min_rect();
+    let free = Rect::from_min_max(
+        egui::pos2(used.right(), used.top()),
+        egui::pos2(ui.max_rect().right(), used.bottom()),
+    );
+    if free.width() <= 0.0 {
+        return;
+    }
+    let response = ui.interact(
+        free,
+        ui.id().with("titlebar drag"),
+        egui::Sense::click_and_drag(),
+    );
+    if response.double_clicked() {
+        let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    } else if response.drag_started_by(egui::PointerButton::Primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
 pub fn fonts(config: &Config) -> Result<egui::FontDefinitions> {
     let mut fonts = egui::FontDefinitions::default();
     if let Some(path) = &config.font_path {
@@ -353,6 +384,10 @@ impl eframe::App for App {
         let mut action = None;
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
+                if cfg!(target_os = "macos") {
+                    ui.add_space(TITLEBAR_INSET);
+                    ui.set_min_height(TITLEBAR_HEIGHT);
+                }
                 for (index, tab) in self.tabs.iter().enumerate() {
                     let title = self.panes[&tab.active].terminal.title().unwrap_or("");
                     let label = if title.is_empty() {
@@ -396,6 +431,9 @@ impl eframe::App for App {
                     }
                 });
             });
+            if cfg!(target_os = "macos") {
+                drag_window(ui);
+            }
         });
         if let Some(error) = self.error.clone() {
             egui::TopBottomPanel::bottom("error").show(ctx, |ui| {

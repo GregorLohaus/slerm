@@ -132,6 +132,35 @@
               unset slermCache slermStale slermTmp slermDir slermGlob slermLib
             fi
           '';
+          # macOS only gives a process a dock icon, a menu bar and a real
+          # application name when it runs from a bundle, so ship one and keep
+          # bin/slerm as a symlink into it for terminal use.
+          appBundle = version: ''
+            app="$out/Applications/slerm.app"
+            mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+            cat > "$app/Contents/Info.plist" <<EOF
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>CFBundleName</key><string>slerm</string>
+              <key>CFBundleDisplayName</key><string>slerm</string>
+              <key>CFBundleExecutable</key><string>slerm</string>
+              <key>CFBundleIdentifier</key><string>org.slerm.slerm</string>
+              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>${version}</string>
+              <key>CFBundleVersion</key><string>${version}</string>
+              <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+              <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+            </dict>
+            </plist>
+            EOF
+            mv "$out/bin/slerm" "$app/Contents/MacOS/slerm"
+            ln -s "$app/Contents/MacOS/slerm" "$out/bin/slerm"
+          '';
           ghosttyEnv = {
             GHOSTTY_SOURCE_DIR = "${ghostty-src}";
             GHOSTTY_ZIG_SYSTEM_DIR = "${ghosttyDeps}";
@@ -182,6 +211,10 @@
                 "--skip=tests::new_panes_start_in_the_directory_of_the_pane_they_came_from"
                 "--skip=tests::osc7_wins_over_the_process_directory_but_only_for_this_machine"
               ];
+
+              postInstall = lib.optionalString pkgs.stdenv.hostPlatform.isDarwin (
+                appBundle manifest.package.version
+              );
 
               postFixup = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                 wrapProgram "$out/bin/slerm" \

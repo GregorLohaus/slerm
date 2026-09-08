@@ -67,12 +67,21 @@ fn main() -> Result<()> {
         return Ok(());
     }
     libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(render::PngDecoder)))?;
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("slerm")
+        .with_inner_size([config.window_width, config.window_height])
+        .with_min_inner_size([320.0, 200.0])
+        .with_app_id("slerm");
+    if cfg!(target_os = "macos") {
+        // Hide the titlebar and draw under it; the traffic lights stay on top of
+        // the tab bar, which reserves room for them (see app::TITLEBAR_INSET).
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("slerm")
-            .with_inner_size([config.window_width, config.window_height])
-            .with_min_inner_size([320.0, 200.0])
-            .with_app_id("slerm"),
+        viewport,
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
