@@ -1,3 +1,4 @@
+use crate::theme::{self, Theme};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::{
@@ -17,9 +18,13 @@ pub struct Config {
     pub scrollback: usize,
     pub window_width: f32,
     pub window_height: f32,
-    pub background: String,
-    pub foreground: String,
-    pub accent: String,
+    pub theme: String,
+    /// Shorthand for the `[colors]` entries of the same name.
+    pub background: Option<String>,
+    pub foreground: Option<String>,
+    pub accent: Option<String>,
+    /// Colors overriding the theme, keyed by the names in `theme::FIELDS`.
+    pub colors: BTreeMap<String, String>,
     pub kitty: Kitty,
     pub multiplexer: Multiplexer,
     pub keys: BTreeMap<String, Action>,
@@ -102,9 +107,11 @@ impl Default for Config {
             scrollback: 10000,
             window_width: 1100.0,
             window_height: 720.0,
-            background: "#17191c".into(),
-            foreground: "#e2e4e8".into(),
-            accent: "#58c4ad".into(),
+            theme: theme::DEFAULT_NAME.into(),
+            background: None,
+            foreground: None,
+            accent: None,
+            colors: BTreeMap::new(),
             kitty: Kitty::default(),
             multiplexer: Multiplexer::default(),
             keys: [
@@ -196,14 +203,38 @@ impl Config {
                 "floating maximums must be 160..16384 points"
             );
         }
-        for color in [&config.background, &config.foreground, &config.accent] {
-            rgb(color)?;
-        }
+        config.theme()?;
         for key in config.keys.keys() {
             shortcut(key)?;
         }
         Ok(config)
     }
+
+    /// The configured theme with the `[colors]` overrides applied. Validated by
+    /// `parse`, so a config that loaded is a config whose theme resolves.
+    pub fn theme(&self) -> Result<Theme> {
+        let mut theme = theme::find(&self.theme)
+            .with_context(|| format!("unknown theme: {} (try --list-themes)", self.theme))?;
+        let shorthand = [
+            ("background", &self.background),
+            ("foreground", &self.foreground),
+            ("accent", &self.accent),
+        ];
+        let named = shorthand
+            .iter()
+            .filter_map(|(name, value)| Some((*name, value.as_ref()?)))
+            .chain(self.colors.iter().map(|(k, v)| (k.as_str(), v)));
+        for (name, value) in named {
+            theme.set(name, packed(value)?)?;
+        }
+        Ok(theme)
+    }
+}
+
+/// A `#RRGGBB` string as the packed integer a theme stores.
+pub fn packed(text: &str) -> Result<theme::Rgb> {
+    let color = rgb(text)?;
+    Ok((color.r as u32) << 16 | (color.g as u32) << 8 | color.b as u32)
 }
 
 pub fn rgb(text: &str) -> Result<libghostty_vt::style::RgbColor> {

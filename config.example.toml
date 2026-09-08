@@ -7,9 +7,26 @@ font_size = 16
 scrollback = 10000
 window_width = 1100
 window_height = 720
-background = "#17191c"
-foreground = "#e2e4e8"
-accent = "#58c4ad"
+
+# Any theme from `slerm --list-themes`: "slerm" plus every theme Helix ships.
+theme = "slerm"
+
+# Shorthand for the [colors] entries of the same name.
+# background = "#17191c"
+# foreground = "#e2e4e8"
+# accent = "#58c4ad"
+
+# Colors overriding the theme, all optional. Alongside the three above:
+#   cursor, selection_background, selection_foreground, border,
+#   chrome_background, chrome_foreground, chrome_active_background,
+#   popup_background,
+# and the sixteen ANSI colors:
+#   black, red, green, yellow, blue, magenta, cyan, white,
+#   and each of those again as bright_black ... bright_white.
+# [colors]
+# cursor = "#58c4ad"
+# red = "#cc6666"
+# bright_red = "#d54e53"
 
 [kitty]
 image_storage_mb = 64

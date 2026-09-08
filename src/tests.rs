@@ -1,4 +1,4 @@
-use crate::{config::Config, input, pane, render};
+use crate::{config::Config, input, pane, render, theme};
 use base64::Engine;
 use egui::{Event, Key, Modifiers};
 use libghostty_vt::{
@@ -30,7 +30,7 @@ fn key(key: Key, modifiers: Modifiers) -> Event {
 
 #[test]
 fn terminal_preserves_unicode_colors_and_application_input_modes() {
-    let mut term = pane::terminal(&Config::default()).unwrap();
+    let mut term = pane::terminal(&Config::default(), &theme::DEFAULT).unwrap();
     term.vt_write("hello \x1b[31mred\x1b[0m \u{754c}e\u{301}\r\n".as_bytes());
     assert!(plain(&term).contains("hello red \u{754c}e\u{301}"));
     let events = [
@@ -59,7 +59,7 @@ fn terminal_preserves_unicode_colors_and_application_input_modes() {
 
 #[test]
 fn queries_return_to_the_pty_and_alternate_screen_restores() {
-    let mut term = pane::terminal(&Config::default()).unwrap();
+    let mut term = pane::terminal(&Config::default(), &theme::DEFAULT).unwrap();
     let response = Rc::new(RefCell::new(vec![]));
     let writer = response.clone();
     term.on_pty_write(move |_, bytes| writer.borrow_mut().extend_from_slice(bytes))
@@ -74,7 +74,7 @@ fn queries_return_to_the_pty_and_alternate_screen_restores() {
 #[test]
 fn kitty_images_decode_render_reuse_and_delete() {
     graphics::set_png_decoder(Some(Box::new(render::PngDecoder))).unwrap();
-    let mut term = pane::terminal(&Config::default()).unwrap();
+    let mut term = pane::terminal(&Config::default(), &theme::DEFAULT).unwrap();
     let replies = Rc::new(RefCell::new(vec![]));
     let output = replies.clone();
     term.on_pty_write(move |_, data| output.borrow_mut().extend_from_slice(data))
@@ -137,10 +137,13 @@ fn kitty_images_decode_render_reuse_and_delete() {
                 .paint(
                     &term,
                     &painter,
-                    rect,
-                    egui::vec2(8.0, 16.0),
-                    &egui::FontId::monospace(12.0),
-                    true,
+                    &render::Grid {
+                        rect,
+                        cell: egui::vec2(8.0, 16.0),
+                        font: &egui::FontId::monospace(12.0),
+                        theme: &theme::DEFAULT,
+                        active: true,
+                    },
                 )
                 .unwrap();
         })
@@ -173,7 +176,7 @@ fn pty_executes_input_and_bracketed_paste_is_sanitized() {
         ..Default::default()
     };
     let ctx = egui::Context::default();
-    let mut pane = pane::Pane::new(&config, &ctx, None).unwrap();
+    let mut pane = pane::Pane::new(&config, &theme::DEFAULT, &ctx, None).unwrap();
     pane.send(b"printf '\\033[31mpty-%s\\033[0m\\n' 'success'\r".to_vec())
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -216,7 +219,7 @@ fn new_panes_start_in_the_directory_of_the_pane_they_came_from() {
     let dir = std::env::temp_dir().join(format!("slerm cwd {}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let dir = dir.canonicalize().unwrap();
-    let mut pane = pane::Pane::new(&config, &ctx, None).unwrap();
+    let mut pane = pane::Pane::new(&config, &theme::DEFAULT, &ctx, None).unwrap();
     pane.send(format!("cd '{}'\r", dir.display()).into_bytes())
         .unwrap();
     // /bin/sh reports no OSC 7, so the directory has to come from the process.
@@ -227,7 +230,7 @@ fn new_panes_start_in_the_directory_of_the_pane_they_came_from() {
     }
     assert_eq!(pane.cwd().as_deref(), Some(dir.as_path()));
 
-    let mut child = pane::Pane::new(&config, &ctx, pane.cwd().as_deref()).unwrap();
+    let mut child = pane::Pane::new(&config, &theme::DEFAULT, &ctx, pane.cwd().as_deref()).unwrap();
     child
         .send(b"printf 'at:%s\\n' \"$PWD\"\r".to_vec())
         .unwrap();
@@ -251,7 +254,7 @@ fn osc7_wins_over_the_process_directory_but_only_for_this_machine() {
     let reported = std::env::temp_dir().join(format!("slerm osc7 {}", std::process::id()));
     std::fs::create_dir_all(&reported).unwrap();
     let reported = reported.canonicalize().unwrap();
-    let mut pane = pane::Pane::new(&config, &ctx, None).unwrap();
+    let mut pane = pane::Pane::new(&config, &theme::DEFAULT, &ctx, None).unwrap();
     let process_cwd = pane.cwd().unwrap();
     assert_ne!(process_cwd, reported);
 

@@ -1,3 +1,4 @@
+use crate::theme::{self, Theme};
 use anyhow::{Result, ensure};
 use egui::{
     Color32, ColorImage, FontId, Painter, Rect, Stroke, TextureHandle, TextureOptions, pos2, vec2,
@@ -14,6 +15,17 @@ use std::{
     io::Cursor,
     sync::Arc,
 };
+
+/// Where a pane's terminal is drawn this frame, and the colors that are slerm's
+/// own rather than the terminal's.
+#[derive(Clone, Copy)]
+pub struct Grid<'a> {
+    pub rect: Rect,
+    pub cell: egui::Vec2,
+    pub font: &'a FontId,
+    pub theme: &'a Theme,
+    pub active: bool,
+}
 
 pub fn color(c: RgbColor) -> Color32 {
     Color32::from_rgb(c.r, c.g, c.b)
@@ -145,6 +157,7 @@ pub struct Renderer {
     glyphs: HashMap<String, Arc<egui::Galley>>,
     font_marker: Option<Arc<egui::Galley>>,
     cached_colors: Option<Colors>,
+    cached_selection: (Color32, Color32),
     cached_cell: egui::Vec2,
     cached_cols: u16,
     #[cfg(test)]
@@ -163,6 +176,7 @@ impl Renderer {
             glyphs: HashMap::new(),
             font_marker: None,
             cached_colors: None,
+            cached_selection: (Color32::PLACEHOLDER, Color32::PLACEHOLDER),
             cached_cell: egui::Vec2::ZERO,
             cached_cols: 0,
             #[cfg(test)]
@@ -174,11 +188,15 @@ impl Renderer {
         &mut self,
         term: &Terminal<'static, '_>,
         painter: &Painter,
-        rect: Rect,
-        cell: egui::Vec2,
-        font: &FontId,
-        active: bool,
+        grid: &Grid<'_>,
     ) -> Result<()> {
+        let &Grid {
+            rect,
+            cell,
+            font,
+            theme,
+            active,
+        } = grid;
         let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
         // Keep one egui galley alive in its cache each frame. A new identity means
         // fonts/DPI/the atlas were reset, invalidating every cached glyph's UVs.
@@ -199,12 +217,18 @@ impl Renderer {
         let colors = snapshot.colors()?;
         let cols = snapshot.cols()?;
         let row_count = snapshot.rows()? as usize;
+        let selected_colors = (
+            theme::color(theme.selection_bg),
+            theme::color(theme.selection_fg),
+        );
         let rebuild_all = snapshot.dirty()? == Dirty::Full
             || self.cached_colors.as_ref() != Some(&colors)
+            || self.cached_selection != selected_colors
             || self.cached_cols != cols
             || self.row_cache.len() != row_count;
         self.row_cache.resize_with(row_count, CachedRow::default);
         self.cached_colors = Some(colors.clone());
+        self.cached_selection = selected_colors;
         self.cached_cols = cols;
         painter.rect_filled(rect, 0, color(colors.background));
         let mut rows = self.rows.update(&snapshot)?;
@@ -237,8 +261,13 @@ impl Renderer {
                 let explicit_bg = c.bg_color()?;
                 let mut bg = color(explicit_bg.unwrap_or(colors.background));
                 let selected = c.is_selected()?;
-                if style.inverse ^ selected {
+                if style.inverse {
                     std::mem::swap(&mut fg, &mut bg);
+                }
+                // A selection takes the theme's own colors rather than inverting
+                // the cell, which would be invisible over inverted text.
+                if selected {
+                    (bg, fg) = selected_colors;
                 }
                 if explicit_bg.is_some() || style.inverse || selected {
                     backgrounds.push(egui::Shape::rect_filled(cell_rect, 0, bg));
@@ -461,7 +490,17 @@ mod tests {
         ctx.run(egui::RawInput::default(), |ctx| {
             let painter = ctx.layer_painter(egui::LayerId::background());
             renderer
-                .paint(term, &painter, rect, cell_size(&painter, font), font, true)
+                .paint(
+                    term,
+                    &painter,
+                    &Grid {
+                        rect,
+                        cell: cell_size(&painter, font),
+                        font,
+                        theme: &theme::DEFAULT,
+                        active: true,
+                    },
+                )
                 .unwrap();
         })
         .shapes
@@ -475,7 +514,9 @@ mod tests {
         };
 
         let ctx = egui::Context::default();
-        let mut term = crate::pane::terminal(&crate::config::Config::default()).unwrap();
+        let mut term =
+            crate::pane::terminal(&crate::config::Config::default(), &crate::theme::DEFAULT)
+                .unwrap();
         term.resize(20, 5, 8, 16).unwrap();
         term.vt_write("\x1b[31mNOR\u{e0b4}\x1b[0m Android\r\nsecond line".as_bytes());
         let rect = Rect::from_min_size(pos2(12.0, 24.0), vec2(200.0, 120.0));
@@ -548,7 +589,9 @@ mod tests {
     #[test]
     fn cached_glyphs_rebuild_after_font_or_scale_changes() {
         let ctx = egui::Context::default();
-        let mut term = crate::pane::terminal(&crate::config::Config::default()).unwrap();
+        let mut term =
+            crate::pane::terminal(&crate::config::Config::default(), &crate::theme::DEFAULT)
+                .unwrap();
         term.resize(20, 5, 8, 16).unwrap();
         term.vt_write(b"font cache");
         let rect = Rect::from_min_size(egui::Pos2::ZERO, vec2(200.0, 120.0));
@@ -595,7 +638,7 @@ mod tests {
         };
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::app::fonts(&config).unwrap());
-        let mut term = crate::pane::terminal(&config).unwrap();
+        let mut term = crate::pane::terminal(&config, &theme::DEFAULT).unwrap();
         term.resize(160, 50, 9, 18).unwrap();
         let screen = (1..=50)
             .map(|row| {
@@ -629,10 +672,16 @@ mod tests {
                             .paint(
                                 &term,
                                 &ctx.layer_painter(egui::LayerId::background()),
-                                Rect::from_min_size(egui::Pos2::ZERO, vec2(1440.0, 900.0)),
-                                vec2(9.0, 18.0),
-                                &FontId::monospace(16.0),
-                                true,
+                                &Grid {
+                                    rect: Rect::from_min_size(
+                                        egui::Pos2::ZERO,
+                                        vec2(1440.0, 900.0),
+                                    ),
+                                    cell: vec2(9.0, 18.0),
+                                    font: &FontId::monospace(16.0),
+                                    theme: &theme::DEFAULT,
+                                    active: true,
+                                },
                             )
                             .unwrap();
                     },

@@ -1,8 +1,9 @@
 use crate::{
-    config::{Config, rgb},
+    config::Config,
     input,
     pty::Pty,
-    render::{Renderer, cell_size},
+    render::{Grid, Renderer, cell_size},
+    theme::{self, Theme},
 };
 use anyhow::{Result, ensure};
 use egui::{FontId, Rect, Sense, vec2};
@@ -91,14 +92,14 @@ fn percent_decode(path: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-pub fn terminal(config: &Config) -> Result<Terminal<'static, 'static>> {
+pub fn terminal(config: &Config, theme: &Theme) -> Result<Terminal<'static, 'static>> {
     let mut term = Terminal::new(TerminalOptions {
         cols: 80,
         rows: 24,
         max_scrollback: config.scrollback,
     })?;
     term.resize(80, 24, 8, 16)?;
-    apply_config(&mut term, config)?;
+    apply_config(&mut term, config, theme)?;
     term.on_xtversion(|_| Some(concat!("slerm ", env!("CARGO_PKG_VERSION"))))?;
     term.on_device_attributes(|_| {
         Some(terminal::DeviceAttributes {
@@ -114,14 +115,21 @@ pub fn terminal(config: &Config) -> Result<Terminal<'static, 'static>> {
             tertiary: Default::default(),
         })
     })?;
-    term.on_color_scheme(|_| Some(terminal::ColorScheme::Dark))?;
+    let scheme = if theme.dark {
+        terminal::ColorScheme::Dark
+    } else {
+        terminal::ColorScheme::Light
+    };
+    term.on_color_scheme(move |_| Some(scheme))?;
     Ok(term)
 }
 
-pub fn apply_config(term: &mut Terminal<'_, '_>, config: &Config) -> Result<()> {
-    term.set_default_fg_color(Some(rgb(&config.foreground)?))?
-        .set_default_bg_color(Some(rgb(&config.background)?))?
-        .set_default_cursor_color(Some(rgb(&config.accent)?))?
+pub fn apply_config(term: &mut Terminal<'_, '_>, config: &Config, theme: &Theme) -> Result<()> {
+    let palette = theme.palette(term.default_color_palette()?);
+    term.set_default_fg_color(Some(theme::rgb_color(theme.foreground)))?
+        .set_default_bg_color(Some(theme::rgb_color(theme.background)))?
+        .set_default_cursor_color(Some(theme::rgb_color(theme.cursor)))?
+        .set_default_color_palette(Some(palette))?
         .set_kitty_image_storage_limit(config.kitty.image_storage_mb * 1024 * 1024)?
         .set_kitty_image_from_file_allowed(config.kitty.allow_file)?
         .set_kitty_image_from_temp_file_allowed(config.kitty.allow_temp_file)?
@@ -130,8 +138,13 @@ pub fn apply_config(term: &mut Terminal<'_, '_>, config: &Config) -> Result<()> 
 }
 
 impl Pane {
-    pub fn new(config: &Config, ctx: &egui::Context, cwd: Option<&Path>) -> Result<Self> {
-        let mut terminal = terminal(config)?;
+    pub fn new(
+        config: &Config,
+        theme: &Theme,
+        ctx: &egui::Context,
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
+        let mut terminal = terminal(config, theme)?;
         let renderer = Renderer::new()?;
         let mouse_encoder = mouse::Encoder::new()?;
         let mouse_event = mouse::Event::new()?;
@@ -261,6 +274,7 @@ impl Pane {
         ui: &mut egui::Ui,
         rect: Rect,
         config: &Config,
+        theme: &Theme,
         active: bool,
     ) -> Result<bool> {
         let font = FontId::monospace(config.font_size);
@@ -289,15 +303,24 @@ impl Pane {
         }
         let response = ui.interact(grid, ui.id().with("terminal"), Sense::click_and_drag());
         self.pointer(ui, &response, grid, cell)?;
-        self.renderer
-            .paint(&self.terminal, ui.painter(), grid, cell, &font, active)?;
+        self.renderer.paint(
+            &self.terminal,
+            ui.painter(),
+            &Grid {
+                rect: grid,
+                cell,
+                font: &font,
+                theme,
+                active,
+            },
+        )?;
         if let Some(error) = &self.error {
             ui.painter().text(
                 grid.left_bottom() - vec2(0.0, ch),
                 egui::Align2::LEFT_TOP,
                 error,
                 FontId::proportional(12.0),
-                egui::Color32::LIGHT_RED,
+                theme::color(theme.ansi[9]),
             );
         }
         Ok(response.clicked()

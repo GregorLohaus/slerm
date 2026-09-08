@@ -7,6 +7,8 @@ mod pty;
 mod render;
 #[cfg(test)]
 mod tests;
+mod theme;
+mod themes;
 
 use anyhow::{Context, Result, bail};
 
@@ -20,13 +22,19 @@ fn main() -> Result<()> {
             "--config" => path = args.next().context("--config needs a path")?.into(),
             "--check-config" => check = true,
             "--init-config" => init = true,
+            "--list-themes" => {
+                for name in theme::names() {
+                    println!("{name}");
+                }
+                return Ok(());
+            }
             "--version" => {
                 println!("slerm {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--help" | "-h" => {
                 println!(
-                    "slerm [--config PATH] [--check-config | --init-config]\n\nDefault config: {}",
+                    "slerm [--config PATH] [--check-config | --init-config | --list-themes]\n\nDefault config: {}",
                     path.display()
                 );
                 return Ok(());

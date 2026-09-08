@@ -3,10 +3,10 @@ use crate::{
     input,
     layout::{Axis, Direction, Layout, PaneId, Tab},
     pane::{self, Pane},
-    render::color,
+    theme::{self, Theme},
 };
 use anyhow::{Result, ensure};
-use egui::{Color32, CornerRadius, Rect, Stroke, vec2};
+use egui::{CornerRadius, Rect, Stroke, vec2};
 use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
@@ -14,6 +14,7 @@ use std::{
 
 pub struct App {
     config: Config,
+    theme: Theme,
     config_path: PathBuf,
     panes: BTreeMap<PaneId, Pane>,
     tabs: Vec<Tab>,
@@ -76,11 +77,13 @@ impl App {
         config: Config,
         config_path: PathBuf,
     ) -> Result<Self> {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        let theme = config.theme()?;
+        cc.egui_ctx.set_visuals(theme.visuals());
         cc.egui_ctx.set_fonts(fonts(&config)?);
-        let pane = Pane::new(&config, &cc.egui_ctx, None)?;
+        let pane = Pane::new(&config, &theme, &cc.egui_ctx, None)?;
         Ok(Self {
             config,
+            theme,
             config_path,
             panes: BTreeMap::from([(1, pane)]),
             tabs: vec![Tab::new(1, 1)],
@@ -102,11 +105,25 @@ impl App {
             .get(self.current)
             .and_then(|tab| self.panes.get(&tab.active))
             .and_then(Pane::cwd);
-        let pane = Pane::new(&self.config, ctx, cwd.as_deref())?;
+        let pane = Pane::new(&self.config, &self.theme, ctx, cwd.as_deref())?;
         let id = self.next_id;
         self.next_id += 1;
         self.panes.insert(id, pane);
         Ok(id)
+    }
+
+    /// Switches theme for this session. Every open pane is retinted, since a
+    /// terminal keeps its palette rather than asking for it each frame.
+    fn set_theme(&mut self, name: &str, ctx: &egui::Context) -> Result<()> {
+        let previous = std::mem::replace(&mut self.config.theme, name.to_owned());
+        self.theme = self.config.theme().inspect_err(|_| {
+            self.config.theme = previous;
+        })?;
+        for pane in self.panes.values_mut() {
+            pane::apply_config(&mut pane.terminal, &self.config, &self.theme)?;
+        }
+        ctx.set_visuals(self.theme.visuals());
+        Ok(())
     }
 
     fn action(&mut self, action: Action, ctx: &egui::Context) -> Result<()> {
@@ -216,10 +233,12 @@ impl App {
             Action::ReloadConfig => {
                 let config = Config::load(&self.config_path)?;
                 let fonts = fonts(&config)?;
+                self.theme = config.theme()?;
                 for pane in self.panes.values_mut() {
-                    pane::apply_config(&mut pane.terminal, &config)?;
+                    pane::apply_config(&mut pane.terminal, &config, &self.theme)?;
                 }
                 ctx.set_fonts(fonts);
+                ctx.set_visuals(self.theme.visuals());
                 self.config = config;
             }
             Action::Copy => {
@@ -382,6 +401,7 @@ impl eframe::App for App {
             return;
         }
         let mut action = None;
+        let mut picked = None;
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if cfg!(target_os = "macos") {
@@ -429,6 +449,20 @@ impl eframe::App for App {
                         action = Some(Action::ReloadConfig);
                         ui.close();
                     }
+                    ui.menu_button("Theme", |ui| {
+                        ui.label("Applies now; set `theme` in the config to keep it.");
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .show(ui, |ui| {
+                                for name in theme::names() {
+                                    let current = self.config.theme == name;
+                                    if ui.selectable_label(current, name).clicked() && !current {
+                                        picked = Some(name);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                    });
                 });
             });
             if cfg!(target_os = "macos") {
@@ -438,14 +472,14 @@ impl eframe::App for App {
         if let Some(error) = self.error.clone() {
             egui::TopBottomPanel::bottom("error").show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(Color32::LIGHT_RED, error);
+                    ui.colored_label(theme::color(self.theme.ansi[9]), error);
                     if ui.button("Dismiss").clicked() {
                         self.error = None;
                     }
                 });
             });
         }
-        let bg = color(config::rgb(&self.config.background).unwrap());
+        let bg = theme::color(self.theme.background);
         let tab = &mut self.tabs[self.current];
         let mut tiled = vec![];
         let mut workspace = Rect::NOTHING;
@@ -464,7 +498,7 @@ impl eframe::App for App {
                     if !tab.zoomed {
                         pane.last_rect = *rect;
                     }
-                    if show_pane(ui, *id, pane, *rect, &self.config, active) {
+                    if show_pane(ui, *id, pane, *rect, &self.config, &self.theme, active) {
                         tab.active = *id;
                     }
                 }
@@ -487,7 +521,7 @@ impl eframe::App for App {
                         let rect = ui.available_rect_before_wrap();
                         ui.allocate_rect(rect, egui::Sense::hover());
                         pane.last_rect = rect;
-                        if show_pane(ui, id, pane, rect, &self.config, active) {
+                        if show_pane(ui, id, pane, rect, &self.config, &self.theme, active) {
                             tab.active = id;
                         }
                     });
@@ -509,6 +543,11 @@ impl eframe::App for App {
             {
                 pane.error = Some(e.to_string());
             }
+        }
+        if let Some(name) = picked
+            && let Err(e) = self.set_theme(name, ctx)
+        {
+            self.error = Some(e.to_string());
         }
         if !self.tabs.is_empty()
             && let Some(action) = action
@@ -552,9 +591,10 @@ fn show_pane(
     pane: &mut Pane,
     rect: Rect,
     config: &Config,
+    theme: &Theme,
     active: bool,
 ) -> bool {
-    let accent = color(config::rgb(&config.accent).unwrap());
+    let accent = theme::color(theme.accent);
     let title_rect = Rect::from_min_size(rect.min, vec2(rect.width(), 25.0_f32.min(rect.height())));
     // The title bar only rounds off the top of the pane, unless the pane is so
     // short that the bar is all there is of it.
@@ -571,7 +611,11 @@ fn show_pane(
             sw: bottom,
             se: bottom,
         },
-        Color32::from_gray(if active { 43 } else { 31 }),
+        theme::color(if active {
+            theme.chrome_active_bg
+        } else {
+            theme.chrome_bg
+        }),
     );
     ui.painter()
         .with_clip_rect(title_rect.shrink(3.0).intersect(ui.clip_rect()))
@@ -580,7 +624,11 @@ fn show_pane(
             egui::Align2::LEFT_TOP,
             pane_title(id, pane),
             egui::FontId::proportional(13.0),
-            if active { accent } else { Color32::GRAY },
+            if active {
+                accent
+            } else {
+                theme::color(theme.chrome_fg)
+            },
         );
     // Click-only leaves dragging to the floating window's existing move handler.
     let header = ui.interact(
@@ -594,7 +642,7 @@ fn show_pane(
     // The pane rectangle is already allocated; a layout scope would grow its parent.
     let mut content_ui = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(content));
     content_ui.set_clip_rect(content.intersect(ui.clip_rect()));
-    match pane.show(&mut content_ui, content, config, active) {
+    match pane.show(&mut content_ui, content, config, theme, active) {
         Ok(clicked) => focused |= clicked,
         Err(e) => pane.error = Some(e.to_string()),
     }
@@ -606,7 +654,7 @@ fn show_pane(
             if active {
                 accent
             } else {
-                Color32::from_gray(54)
+                theme::color(theme.border)
             },
         ),
         egui::StrokeKind::Inside,
@@ -649,9 +697,11 @@ mod tests {
             shell: vec!["/bin/sh".into()],
             ..Default::default()
         };
-        let pane = Pane::new(&config, ctx, None).unwrap();
+        let theme = config.theme().unwrap();
+        let pane = Pane::new(&config, &theme, ctx, None).unwrap();
         App {
             config,
+            theme,
             config_path: PathBuf::new(),
             panes: BTreeMap::from([(1, pane)]),
             tabs: vec![Tab::new(1, 1)],
@@ -687,6 +737,7 @@ mod tests {
                             app.panes.get_mut(&1).unwrap(),
                             rect,
                             &app.config,
+                            &app.theme,
                             true,
                         );
                     })
