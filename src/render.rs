@@ -582,7 +582,7 @@ mod tests {
             ..Default::default()
         };
         ctx.set_fonts(crate::fonts::load(&config).unwrap());
-        let mut term = crate::pane::terminal(&config).unwrap();
+        let mut term = crate::pane::terminal(&config, &theme::DEFAULT).unwrap();
         term.resize(20, 2, 8, 16).unwrap();
         term.vt_write(b"M\x1b[1mM\x1b[22;3mM\x1b[1mM\x1b[0mM");
         let mut renderer = Renderer::new().unwrap();
