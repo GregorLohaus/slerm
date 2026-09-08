@@ -15,6 +15,11 @@ pub struct Config {
     pub working_directory: Option<PathBuf>,
     pub font_size: f32,
     pub font_path: Option<PathBuf>,
+    pub font_family: Option<String>,
+    pub font_bold_path: Option<PathBuf>,
+    pub font_italic_path: Option<PathBuf>,
+    pub font_bold_italic_path: Option<PathBuf>,
+    pub font_fallbacks: Vec<String>,
     pub scrollback: usize,
     pub window_width: f32,
     pub window_height: f32,
@@ -104,6 +109,11 @@ impl Default for Config {
             working_directory: None,
             font_size: 16.0,
             font_path: None,
+            font_family: None,
+            font_bold_path: None,
+            font_italic_path: None,
+            font_bold_italic_path: None,
+            font_fallbacks: Vec::new(),
             scrollback: 10000,
             window_width: 1100.0,
             window_height: 720.0,
@@ -160,6 +170,18 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Self> {
         let config: Self = toml::from_str(text)?;
+        ensure!(
+            config.font_path.is_none() || config.font_family.is_none(),
+            "set either font_family or font_path, not both"
+        );
+        ensure!(
+            config
+                .font_family
+                .iter()
+                .chain(&config.font_fallbacks)
+                .all(|name| !name.trim().is_empty()),
+            "font family names must not be empty"
+        );
         ensure!(
             !config.shell.is_empty() && !config.shell[0].is_empty(),
             "shell must contain an executable"
@@ -281,6 +303,9 @@ mod tests {
         assert_eq!(example.keys, Config::default().keys);
         for text in [
             "font_size = nan",
+            "font_family = ''",
+            "font_fallbacks = [' ']",
+            "font_family = 'Test'\nfont_path = '/font.ttf'",
             "shell = []",
             "background = '#xx0000'",
             "font_sze = 16",

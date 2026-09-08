@@ -8,6 +8,7 @@ use libghostty_vt::{
     alloc::{Allocator, Bytes},
     kitty::graphics::{DecodePng, DecodedImage, ImageFormat, Layer, PlacementIterator},
     render::{CellIterator, Colors, CursorVisualStyle, Dirty, RowIterator},
+    screen::CellWide,
     style::{RgbColor, Underline},
 };
 use std::{
@@ -140,11 +141,49 @@ struct CachedRow {
 }
 
 fn layout_glyph(painter: &Painter, text: String, font: &FontId, height: f32) -> Arc<egui::Galley> {
+    layout_styled_glyph(painter, text, font, height, false)
+}
+
+fn layout_styled_glyph(
+    painter: &Painter,
+    text: String,
+    font: &FontId,
+    height: f32,
+    italics: bool,
+) -> Arc<egui::Galley> {
     let mut job =
         egui::text::LayoutJob::simple(text, font.clone(), Color32::PLACEHOLDER, f32::INFINITY);
     job.sections[0].format.line_height = Some(height);
     job.sections[0].format.valign = egui::Align::Center;
+    job.sections[0].format.italics = italics;
     painter.layout_job(job)
+}
+
+fn nerd_icon(text: &str) -> bool {
+    // Includes the supplementary private-use plane used by Material Design.
+    text.chars()
+        .next()
+        .is_some_and(|c| matches!(c as u32, 0xe000..=0xf8ff | 0xf0000..=0xffffd))
+}
+
+fn icon_shape(galley: Arc<egui::Galley>, rect: Rect, color: Color32) -> egui::Shape {
+    // Use ink bounds: patched fonts can have bearings or outlines that extend
+    // well beyond their nominal advance. Fit uniformly and center in the cell
+    // allocation so icons cannot cover neighboring text or rows.
+    let bounds = galley.mesh_bounds;
+    let mut shape = egui::epaint::TextShape::new(egui::Pos2::ZERO, galley, color);
+    if bounds.is_positive() {
+        let scale = (rect.width() / bounds.width())
+            .min(rect.height() / bounds.height())
+            .min(1.0);
+        shape.transform(egui::emath::TSTransform {
+            scaling: scale,
+            translation: rect.center().to_vec2() - bounds.center().to_vec2() * scale,
+        });
+    } else {
+        shape.pos = rect.min;
+    }
+    shape.into()
 }
 
 pub struct Renderer {
@@ -154,8 +193,9 @@ pub struct Renderer {
     placements: PlacementIterator<'static>,
     textures: HashMap<u32, (u64, TextureHandle)>,
     row_cache: Vec<CachedRow>,
-    glyphs: HashMap<String, Arc<egui::Galley>>,
+    glyphs: HashMap<(String, bool, bool), Arc<egui::Galley>>,
     font_marker: Option<Arc<egui::Galley>>,
+    synthetic_styles: [(bool, bool); 4],
     cached_colors: Option<Colors>,
     cached_selection: (Color32, Color32),
     cached_cell: egui::Vec2,
@@ -175,6 +215,7 @@ impl Renderer {
             row_cache: Vec::new(),
             glyphs: HashMap::new(),
             font_marker: None,
+            synthetic_styles: [(false, false); 4],
             cached_colors: None,
             cached_selection: (Color32::PLACEHOLDER, Color32::PLACEHOLDER),
             cached_cell: egui::Vec2::ZERO,
@@ -201,18 +242,46 @@ impl Renderer {
         // Keep one egui galley alive in its cache each frame. A new identity means
         // fonts/DPI/the atlas were reset, invalidating every cached glyph's UVs.
         let marker = layout_glyph(&painter, "M".into(), font, cell.y);
-        if self
+        let fonts_changed = self
             .font_marker
             .as_ref()
             .is_none_or(|old| !Arc::ptr_eq(old, &marker))
             || self.cached_cell != cell
-            || self.glyphs.len() > 4096
-        {
+            || self.glyphs.len() > 4096;
+        if fonts_changed {
             self.row_cache.clear();
             self.glyphs.clear();
         }
         self.font_marker = Some(marker);
         self.cached_cell = cell;
+        let style_fonts = painter.ctx().fonts(|fonts| {
+            [(false, false), (true, false), (false, true), (true, true)].map(|(bold, italic)| {
+                let family = crate::fonts::family(bold, italic);
+                if font.family == egui::FontFamily::Monospace
+                    && fonts.definitions().families.contains_key(&family)
+                {
+                    FontId::new(font.size, family)
+                } else {
+                    font.clone()
+                }
+            })
+        });
+        if fonts_changed {
+            self.synthetic_styles = painter.ctx().fonts(|fonts| {
+                let first_face = |index: usize| {
+                    fonts.definitions().families[&style_fonts[index].family]
+                        .first()
+                        .map(|name| &fonts.definitions().font_data[name])
+                };
+                std::array::from_fn::<_, 4, _>(|index| {
+                    (
+                        index & 1 != 0 && first_face(index) == first_face(index & !1),
+                        index & 2 != 0 && first_face(index) == first_face(index & !2),
+                    )
+                })
+            });
+        }
+        let synthetic = self.synthetic_styles;
         let snapshot = self.state.update(term)?;
         let colors = snapshot.colors()?;
         let cols = snapshot.cols()?;
@@ -275,27 +344,52 @@ impl Renderer {
                 if style.faint {
                     fg = fg.gamma_multiply(0.6);
                 }
-                if !style.invisible && c.graphemes_len()? > 0 {
+                let wide = c.raw_cell()?.wide()?;
+                if !style.invisible
+                    && !matches!(wide, CellWide::SpacerHead | CellWide::SpacerTail)
+                    && c.graphemes_len()? > 0
+                {
                     c.graphemes_utf8(&mut text)?;
                     // Placeholder cells are reserved by the Kitty protocol, not printable text.
                     if let Some(separator) = powerline_shape(&text, cell_rect, fg) {
                         foregrounds.push(separator);
                     } else if text != " " && !text.starts_with('\u{10eeee}') {
-                        let galley = if let Some(galley) = self.glyphs.get(&text) {
+                        let index = usize::from(style.bold) + 2 * usize::from(style.italic);
+                        let icon = nerd_icon(&text);
+                        let key = (text.clone(), style.bold, style.italic);
+                        let galley = if let Some(galley) = self.glyphs.get(&key) {
                             galley.clone()
                         } else {
-                            let galley = layout_glyph(&painter, text.clone(), font, cell.y);
-                            self.glyphs.insert(text.clone(), galley.clone());
+                            let font = &style_fonts[index];
+                            let galley = layout_styled_glyph(
+                                &painter,
+                                text.clone(),
+                                font,
+                                cell.y,
+                                synthetic[index].1 && !icon,
+                            );
+                            self.glyphs.insert(key, galley.clone());
                             galley
                         };
-                        foregrounds.push(egui::Shape::galley(pos, galley.clone(), fg));
-                        if style.bold {
+                        // Keep style emphasis for regular-only fonts; real style
+                        // faces are drawn once. Never distort symbol outlines.
+                        if synthetic[index].0 && !icon {
                             foregrounds.push(egui::Shape::galley(
                                 pos + vec2(0.45, 0.0),
-                                galley,
+                                galley.clone(),
                                 fg,
                             ));
                         }
+                        foregrounds.push(if icon {
+                            let width = if wide == CellWide::Wide { 2.0 } else { 1.0 };
+                            icon_shape(
+                                galley,
+                                Rect::from_min_size(pos, vec2(cell.x * width, cell.y)),
+                                fg,
+                            )
+                        } else {
+                            egui::Shape::galley(pos, galley, fg)
+                        });
                     }
                 }
                 for (enabled, height) in [
@@ -479,6 +573,82 @@ fn paint_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sgr_styles_use_distinct_cached_faces_without_double_drawing() {
+        let ctx = egui::Context::default();
+        let config = crate::config::Config {
+            font_path: std::env::var_os("SLERM_TEST_FONT").map(Into::into),
+            ..Default::default()
+        };
+        ctx.set_fonts(crate::fonts::load(&config).unwrap());
+        let mut term = crate::pane::terminal(&config).unwrap();
+        term.resize(20, 2, 8, 16).unwrap();
+        term.vt_write(b"M\x1b[1mM\x1b[22;3mM\x1b[1mM\x1b[0mM");
+        let mut renderer = Renderer::new().unwrap();
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, vec2(200.0, 100.0));
+        let font = FontId::monospace(16.0);
+        frame(&ctx, &mut renderer, &term, rect, &font);
+        assert_eq!(renderer.glyphs.len(), 4);
+        assert_eq!(
+            renderer.row_cache[0].foregrounds.len(),
+            if config.font_path.is_some() { 5 } else { 7 }
+        );
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let galley = &renderer.glyphs[&("M".into(), bold, italic)];
+            assert_eq!(
+                galley.job.sections[0].format.font_id.family,
+                crate::fonts::family(bold, italic)
+            );
+        }
+        let before = renderer.glyphs[&("M".into(), true, true)].clone();
+        let mut fonts = crate::fonts::load(&config).unwrap();
+        fonts
+            .families
+            .get_mut(&crate::fonts::family(true, true))
+            .unwrap()
+            .reverse();
+        ctx.set_fonts(fonts);
+        frame(&ctx, &mut renderer, &term, rect, &font);
+        assert!(!Arc::ptr_eq(
+            &before,
+            &renderer.glyphs[&("M".into(), true, true)]
+        ));
+    }
+
+    #[test]
+    fn icons_fit_ink_bounds_at_different_scales_and_cell_widths() {
+        let config = crate::config::Config {
+            font_path: std::env::var_os("SLERM_TEST_FONT").map(Into::into),
+            ..Default::default()
+        };
+        let fonts = crate::fonts::load(&config).unwrap();
+        for scale in [1.0, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(fonts.clone());
+            ctx.set_pixels_per_point(scale);
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                for text in ["\u{e0a0}", "\u{f121}", "\u{f0001}"] {
+                    assert!(nerd_icon(text));
+                    for width in [4.0, 9.0, 18.0] {
+                        let rect = Rect::from_min_size(pos2(23.0, 41.0), vec2(width, 18.0));
+                        let galley =
+                            layout_glyph(&painter, text.into(), &FontId::monospace(20.0), 18.0);
+                        let shape = icon_shape(galley, rect, Color32::WHITE);
+                        let bounds = shape.visual_bounding_rect();
+                        assert!(
+                            rect.expand(0.001).contains_rect(bounds),
+                            "{text:?}: {bounds:?} outside {rect:?}"
+                        );
+                        assert!(bounds.center().distance(rect.center()) < 0.001);
+                    }
+                }
+            });
+        }
+        assert!(!nerd_icon("M"));
+        assert!(!nerd_icon("\u{10eeee}"));
+    }
 
     fn frame(
         ctx: &egui::Context,

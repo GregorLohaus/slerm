@@ -2,7 +2,20 @@
 # Omit shell to use $SHELL. Arguments are separate array entries.
 # shell = ["/bin/bash", "--login"]
 # working_directory = "/home/you"
-font_path = "/usr/local/share/fonts/MononokiNerdFontMono-Regular.ttf"
+# Select an installed family; regular, bold, italic and bold italic are matched
+# automatically. Install a patched Nerd Font to get its icons.
+# font_family = "GeistMono Nerd Font Mono"
+# Alternatively load a file; matching style faces are discovered beside it.
+# font_path = "/usr/local/share/fonts/MononokiNerdFontMono-Regular.ttf"
+# Optional overrides for individual faces:
+# font_bold_path = "/path/to/Bold.ttf"
+# font_italic_path = "/path/to/Italic.ttf"
+# font_bold_italic_path = "/path/to/BoldItalic.ttf"
+# Ordered installed fallback families, used for missing glyphs in every style.
+# font_fallbacks = ["Symbols Nerd Font Mono"]
+# Symbols Nerd Font Mono (or Symbols Nerd Font) is also used automatically when
+# installed. Missing styles use the closest available face in the family;
+# regular-only fonts retain synthetic bold/italic emphasis.
 font_size = 16
 scrollback = 10000
 window_width = 1100

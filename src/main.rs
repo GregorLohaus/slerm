@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod fonts;
 mod input;
 mod layout;
 mod pane;
