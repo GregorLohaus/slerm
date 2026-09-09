@@ -207,6 +207,7 @@
               checkFlags = [
                 "--test-threads=1"
                 "--skip=app::tests::"
+                "--skip=pane::scrollback_tests::"
                 "--skip=tests::pty_executes_input_and_bracketed_paste_is_sanitized"
                 "--skip=tests::new_panes_start_in_the_directory_of_the_pane_they_came_from"
                 "--skip=tests::osc7_wins_over_the_process_directory_but_only_for_this_machine"

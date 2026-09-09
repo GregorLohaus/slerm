@@ -21,6 +21,7 @@ pub struct Config {
     pub font_bold_italic_path: Option<PathBuf>,
     pub font_fallbacks: Vec<String>,
     pub scrollback: usize,
+    pub scrollback_editor: Option<String>,
     pub window_width: f32,
     pub window_height: f32,
     pub theme: String,
@@ -77,6 +78,7 @@ pub enum Action {
     ReloadConfig,
     Copy,
     Paste,
+    OpenScrollback,
 }
 
 impl Default for Kitty {
@@ -115,6 +117,7 @@ impl Default for Config {
             font_bold_italic_path: None,
             font_fallbacks: Vec::new(),
             scrollback: 10000,
+            scrollback_editor: None,
             window_width: 1100.0,
             window_height: 720.0,
             theme: theme::DEFAULT_NAME.into(),
@@ -135,6 +138,7 @@ impl Default for Config {
                 ("Alt+Shift+H", Action::PreviousTab),
                 ("Alt+Shift+L", Action::NextTab),
                 ("Alt+X", Action::ClosePane),
+                ("Alt+S", Action::OpenScrollback),
                 ("Ctrl+Shift+Z", Action::ZoomPane),
                 ("Ctrl+Shift+R", Action::ReloadConfig),
                 ("Ctrl+Shift+C", Action::Copy),
@@ -186,6 +190,14 @@ impl Config {
             !config.shell.is_empty() && !config.shell[0].is_empty(),
             "shell must contain an executable"
         );
+        if let Some(editor) = &config.scrollback_editor {
+            let command =
+                shell_words::split(editor).context("Invalid scrollback_editor command")?;
+            ensure!(
+                !command.is_empty() && !command[0].is_empty(),
+                "scrollback_editor must contain an executable"
+            );
+        }
         ensure!(
             (8.0..=48.0).contains(&config.font_size),
             "font_size must be 8..48"
@@ -307,6 +319,10 @@ mod tests {
             "font_fallbacks = [' ']",
             "font_family = 'Test'\nfont_path = '/font.ttf'",
             "shell = []",
+            "scrollback_editor = ''",
+            "scrollback_editor = ' '",
+            "scrollback_editor = \"''\"",
+            "scrollback_editor = \"'\"",
             "background = '#xx0000'",
             "font_sze = 16",
             "[keys]\n'Hyper+Q' = 'close_pane'",
@@ -330,6 +346,7 @@ mod tests {
             ("Alt+Shift+H", Action::PreviousTab),
             ("Alt+Shift+L", Action::NextTab),
             ("Alt+X", Action::ClosePane),
+            ("Alt+S", Action::OpenScrollback),
         ] {
             assert_eq!(config.keys.get(binding), Some(&action));
             assert!(shortcut(binding).unwrap().modifiers.alt);

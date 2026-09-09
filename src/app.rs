@@ -235,6 +235,13 @@ impl App {
                 }
             }
             Action::Paste => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+            Action::OpenScrollback => {
+                self.panes.get_mut(&active).unwrap().open_scrollback(
+                    &self.config,
+                    &self.theme,
+                    ctx,
+                )?;
+            }
         }
         Ok(())
     }
@@ -425,6 +432,7 @@ impl eframe::App for App {
                         ("Zoom / restore", Action::ZoomPane),
                         ("Next pane", Action::NextPane),
                         ("Close pane", Action::ClosePane),
+                        ("Open scrollback in editor", Action::OpenScrollback),
                     ] {
                         if ui.button(label).clicked() {
                             action = Some(a);

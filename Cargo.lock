@@ -2319,6 +2319,7 @@ dependencies = [
  "png",
  "portable-pty",
  "serde",
+ "shell-words",
  "toml",
  "wgpu",
 ]

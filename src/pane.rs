@@ -5,7 +5,7 @@ use crate::{
     render::{Grid, Renderer, cell_size},
     theme::{self, Theme},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use egui::{FontId, Rect, Sense, vec2};
 use libghostty_vt::{
     Terminal, TerminalOptions, mouse,
@@ -33,6 +33,134 @@ pub struct Pane {
     mouse_event: mouse::Event<'static>,
     selection_start: Option<PointCoordinate>,
     focused: bool,
+    saved_session: Option<(Box<Pane>, ScrollbackFile)>,
+}
+
+struct ScrollbackFile(PathBuf);
+
+impl ScrollbackFile {
+    fn new(bytes: &[u8]) -> Result<Self> {
+        use std::{
+            fs::OpenOptions,
+            io::Write,
+            os::unix::fs::OpenOptionsExt,
+            sync::atomic::{AtomicU64, Ordering},
+        };
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "slerm-scrollback-{}-{}.txt",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let temporary = Self(path);
+                    file.write_all(bytes)?;
+                    return Ok(temporary);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod scrollback_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn editor_receives_history_and_restores_original_session_on_exit() {
+        let ctx = egui::Context::default();
+        let config = Config {
+            shell: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "read answer; printf ORIGINAL_ALIVE; read answer".into(),
+            ],
+            scrollback_editor: Config::parse(
+                "scrollback_editor = \"/bin/sh -c 'printf EDITOR_READY; read answer' editor\"",
+            )
+            .unwrap()
+            .scrollback_editor,
+            ..Default::default()
+        };
+        let mut pane = Pane::new(&config, &theme::DEFAULT, &ctx, None).unwrap();
+        pane.terminal.resize(12, 2, 8, 16).unwrap();
+        pane.terminal
+            .vt_write(b"history\r\n\x1b[31mred\x1b[0m\r\nlong line that wraps\r\nlast");
+        pane.open_scrollback(&config, &theme::DEFAULT, &ctx)
+            .unwrap();
+        let (original, file) = pane.saved_session.as_ref().unwrap();
+        assert!(!original.dead);
+        let path = file.0.clone();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("history\nred\nlong line that wraps\nlast"),
+            "{contents:?}"
+        );
+        assert!(!contents.contains('\x1b'));
+        pane.send(b"done\n".to_vec()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pane.saved_session.is_some() && Instant::now() < deadline {
+            pane.drain(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pane.saved_session.is_none());
+        assert!(!pane.dead);
+        assert!(!path.exists());
+        pane.send(b"continue\n".to_vec()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            pane.drain(&ctx);
+            let text = libghostty_vt::fmt::Formatter::new(
+                &pane.terminal,
+                libghostty_vt::fmt::FormatterOptions::new().with_unwrap(true),
+            )
+            .unwrap()
+            .format_alloc(None)
+            .unwrap();
+            if String::from_utf8_lossy(&text).contains("ORIGINAL_ALIVE") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "original process did not resume input"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn invalid_editor_leaves_the_original_pane_intact() {
+        let ctx = egui::Context::default();
+        let config = Config {
+            shell: vec!["/bin/sh".into()],
+            ..Default::default()
+        };
+        let mut pane = Pane::new(&config, &theme::DEFAULT, &ctx, None).unwrap();
+        for editor in ["", "'", "/no/such/slerm-editor"] {
+            assert!(
+                pane.open_scrollback_with_editor(&config, &theme::DEFAULT, &ctx, editor)
+                    .is_err()
+            );
+            assert!(pane.saved_session.is_none());
+            assert!(!pane.dead);
+        }
+    }
+}
+
+impl Drop for ScrollbackFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// OSC 7 carries a `file://host/path` URL. Only a directory on this machine can be
@@ -181,10 +309,14 @@ impl Pane {
             mouse_event,
             selection_start: None,
             focused: false,
+            saved_session: None,
         })
     }
 
     pub fn drain(&mut self, ctx: &egui::Context) {
+        if let Some((session, _)) = &mut self.saved_session {
+            session.drain(ctx);
+        }
         // Bound work per frame as well as queued bytes, so one busy PTY cannot starve others.
         let mut drained = 0;
         for _ in 0..64 {
@@ -210,6 +342,66 @@ impl Pane {
         if drained == 64 {
             ctx.request_repaint();
         }
+        if self.dead
+            && let Some((session, _file)) = self.saved_session.take()
+        {
+            *self = *session;
+            ctx.request_repaint();
+        }
+    }
+
+    pub fn open_scrollback(
+        &mut self,
+        config: &Config,
+        theme: &Theme,
+        ctx: &egui::Context,
+    ) -> Result<()> {
+        if self.saved_session.is_some() {
+            return Ok(());
+        }
+        let editor = config
+            .scrollback_editor
+            .clone()
+            .unwrap_or_else(|| std::env::var("EDITOR").unwrap_or_else(|_| "vi".into()));
+        self.open_scrollback_with_editor(config, theme, ctx, &editor)
+    }
+
+    fn open_scrollback_with_editor(
+        &mut self,
+        config: &Config,
+        theme: &Theme,
+        ctx: &egui::Context,
+        editor: &str,
+    ) -> Result<()> {
+        use libghostty_vt::fmt::{Formatter, FormatterOptions};
+        let mut command =
+            shell_words::split(editor).context("Invalid scrollback editor command")?;
+        ensure!(
+            !command.is_empty() && !command[0].is_empty(),
+            "Scrollback editor command is empty"
+        );
+        self.drain(ctx);
+        let bytes = Formatter::new(
+            &self.terminal,
+            FormatterOptions::new().with_trim(true).with_unwrap(true),
+        )?
+        .format_alloc(None)?;
+        let file = ScrollbackFile::new(&bytes).context("Cannot save scrollback")?;
+        command.push(
+            file.0
+                .to_str()
+                .context("Scrollback path is not valid UTF-8")?
+                .into(),
+        );
+        let mut editor_config = config.clone();
+        editor_config.shell = command;
+        let mut editor_pane = Self::new(&editor_config, theme, ctx, self.cwd().as_deref())
+            .context("Cannot open scrollback editor")?;
+        editor_pane.last_rect = self.last_rect;
+        let session = std::mem::replace(self, editor_pane);
+        self.saved_session = Some((Box::new(session), file));
+        ctx.request_repaint();
+        Ok(())
     }
 
     pub fn send(&mut self, bytes: Vec<u8>) -> Result<()> {

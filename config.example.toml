@@ -18,6 +18,10 @@
 # regular-only fonts retain synthetic bold/italic emphasis.
 font_size = 16
 scrollback = 10000
+# Command for opening scrollback; omit to use $EDITOR, or vi if unset.
+# Supports quoted arguments; the scrollback file path is appended automatically.
+# Runs directly without shell expansion. The editor should stay in the foreground.
+# scrollback_editor = "nvim -R"
 window_width = 1100
 window_height = 720
 
@@ -67,6 +71,8 @@ floating_max_height = 640
 "Alt+Shift+H" = "previous_tab"
 "Alt+Shift+L" = "next_tab"
 "Alt+X" = "close_pane"
+# Open scrollback in scrollback_editor (or $EDITOR/vi), returning on exit.
+"Alt+S" = "open_scrollback"
 "Ctrl+Shift+Z" = "zoom_pane"
 "Ctrl+Shift+R" = "reload_config"
 "Ctrl+Shift+C" = "copy"
