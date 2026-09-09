@@ -7,6 +7,11 @@ use libghostty_vt::style::{Palette, PaletteIndex, RgbColor};
 /// integers rather than anything that needs allocating or parsing at startup.
 pub type Rgb = u32;
 
+/// Shared stroke width for pane borders and the default hollow cursor.
+pub const BORDER_WIDTH: f32 = 1.0;
+pub const CORNER_RADIUS: u8 = 5;
+pub const CURSOR_CORNER_RADIUS: u8 = 2;
+
 /// Every color slerm draws with. A theme covers the terminal grid, the sixteen
 /// ANSI colors programs address by index, and the chrome around them, so that
 /// picking a light theme does not leave a dark tab bar behind.

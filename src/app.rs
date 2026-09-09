@@ -571,7 +571,7 @@ fn grab_keys(ctx: &egui::Context) {
 }
 
 /// Corner rounding shared by a pane's border and its title bar.
-const CORNER: u8 = 5;
+const CORNER: u8 = theme::CORNER_RADIUS;
 
 fn show_pane(
     ui: &mut egui::Ui,
@@ -638,7 +638,7 @@ fn show_pane(
         rect,
         CORNER,
         Stroke::new(
-            1.0_f32,
+            theme::BORDER_WIDTH,
             if active {
                 accent
             } else {

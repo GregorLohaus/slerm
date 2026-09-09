@@ -100,6 +100,8 @@ pub fn terminal(config: &Config, theme: &Theme) -> Result<Terminal<'static, 'sta
     })?;
     term.resize(80, 24, 8, 16)?;
     apply_config(&mut term, config, theme)?;
+    term.set_default_cursor_style(Some(terminal::CursorStyle::BlockHollow))?;
+    term.vt_write(b"\x1b[0 q");
     term.on_xtversion(|_| Some(concat!("slerm ", env!("CARGO_PKG_VERSION"))))?;
     term.on_device_attributes(|_| {
         Some(terminal::DeviceAttributes {

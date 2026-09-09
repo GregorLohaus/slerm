@@ -29,6 +29,29 @@ fn key(key: Key, modifiers: Modifiers) -> Event {
 }
 
 #[test]
+fn cursor_defaults_to_hollow_and_respects_application_styles() {
+    use libghostty_vt::{RenderState, render::CursorVisualStyle};
+
+    let mut term = pane::terminal(&Config::default(), &theme::DEFAULT).unwrap();
+    let mut state = RenderState::new().unwrap();
+    let snapshot = state.update(&term).unwrap();
+    assert_eq!(
+        snapshot.cursor_visual_style().unwrap(),
+        CursorVisualStyle::BlockHollow
+    );
+    for (sequence, expected) in [
+        (b"\x1b[2 q", CursorVisualStyle::Block),
+        (b"\x1b[4 q", CursorVisualStyle::Underline),
+        (b"\x1b[6 q", CursorVisualStyle::Bar),
+        (b"\x1b[0 q", CursorVisualStyle::BlockHollow),
+    ] {
+        term.vt_write(sequence);
+        let snapshot = state.update(&term).unwrap();
+        assert_eq!(snapshot.cursor_visual_style().unwrap(), expected);
+    }
+}
+
+#[test]
 fn terminal_preserves_unicode_colors_and_application_input_modes() {
     let mut term = pane::terminal(&Config::default(), &theme::DEFAULT).unwrap();
     term.vt_write("hello \x1b[31mred\x1b[0m \u{754c}e\u{301}\r\n".as_bytes());

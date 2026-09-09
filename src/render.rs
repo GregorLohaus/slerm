@@ -471,11 +471,37 @@ impl Renderer {
                     cursor_rect.min.y = cursor_rect.max.y - 2.0;
                     painter.rect_filled(cursor_rect, 0, c);
                 }
+                CursorVisualStyle::Block if active => {
+                    painter.rect_filled(cursor_rect, 0, c);
+                    // Redraw the covered glyph in the background color so an
+                    // application's solid block cursor leaves text readable.
+                    let ink = color(colors.background);
+                    let cursor_painter =
+                        painter.with_clip_rect(cursor_rect.intersect(painter.clip_rect()));
+                    cursor_painter.extend(
+                        self.row_cache[cursor.y as usize]
+                            .foregrounds
+                            .iter()
+                            .cloned()
+                            .map(|mut shape| {
+                                shape.translate(rect.min.to_vec2());
+                                egui::epaint::shape_transform::adjust_colors(
+                                    &mut shape,
+                                    move |color| {
+                                        if *color != Color32::TRANSPARENT {
+                                            *color = ink;
+                                        }
+                                    },
+                                );
+                                shape
+                            }),
+                    );
+                }
                 _ => {
                     painter.rect_stroke(
                         cursor_rect,
-                        0,
-                        Stroke::new(if active { 1.5_f32 } else { 0.75_f32 }, c),
+                        theme::CURSOR_CORNER_RADIUS,
+                        Stroke::new(theme::BORDER_WIDTH, c),
                         egui::StrokeKind::Inside,
                     );
                 }
