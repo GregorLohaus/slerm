@@ -31,12 +31,34 @@ pub struct Pane {
     callback_error: Rc<RefCell<Option<String>>>,
     mouse_encoder: mouse::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
+    scrollback_scroll: ScrollAccumulator,
+    mouse_scroll: ScrollAccumulator,
     selection_start: Option<PointCoordinate>,
     focused: bool,
     saved_session: Option<(Box<Pane>, ScrollbackFile)>,
 }
 
 struct ScrollbackFile(PathBuf);
+
+#[derive(Default)]
+struct ScrollAccumulator(f32);
+
+impl ScrollAccumulator {
+    fn rows(&mut self, delta: f32) -> isize {
+        self.0 += delta;
+        let rows = self.0.trunc();
+        self.0 -= rows;
+        rows as isize
+    }
+
+    fn wheel(&mut self, unit: egui::MouseWheelUnit, delta: f32, cell: f32, page: u16) -> isize {
+        self.rows(match unit {
+            egui::MouseWheelUnit::Point => delta / cell,
+            egui::MouseWheelUnit::Line => delta * 3.0,
+            egui::MouseWheelUnit::Page => delta * f32::from(page),
+        })
+    }
+}
 
 impl ScrollbackFile {
     fn new(bytes: &[u8]) -> Result<Self> {
@@ -68,6 +90,41 @@ impl ScrollbackFile {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn precise_scrolling_preserves_distance_across_frames() {
+        let mut scroll = ScrollAccumulator::default();
+        // Sub-pixel events from a slow gesture must eventually move a row.
+        let rows: isize = (0..128).map(|_| scroll.rows(0.25 / 16.0)).sum();
+        assert_eq!(rows, 2);
+        assert_eq!(scroll.0, 0.0);
+
+        let mut batched = ScrollAccumulator::default();
+        assert_eq!(batched.rows(32.0 / 16.0), rows);
+        assert_eq!(scroll.rows(1.75), 1);
+        assert_eq!(scroll.rows(0.25), 1);
+        assert_eq!(scroll.rows(-0.75), 0);
+        assert_eq!(scroll.rows(-0.25), -1);
+        assert_eq!(scroll.rows(0.75), 0);
+        assert_eq!(scroll.rows(-0.75), 0);
+    }
+
+    #[test]
+    fn mouse_tracking_respects_precise_distance_and_wheel_units() {
+        use egui::MouseWheelUnit::{Line, Page, Point};
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(scroll.wheel(Point, 0.0, 16.0, 24), 0);
+        assert_eq!(scroll.wheel(Point, 4.0, 16.0, 24), 0);
+        assert_eq!(scroll.wheel(Point, 12.0, 16.0, 24), 1);
+        assert_eq!(scroll.wheel(Point, -32.0, 16.0, 24), -2);
+        assert_eq!(scroll.wheel(Line, 1.0, 16.0, 24), 3);
+        assert_eq!(scroll.wheel(Page, -1.0, 16.0, 24), -24);
     }
 }
 
@@ -307,6 +364,8 @@ impl Pane {
             callback_error,
             mouse_encoder,
             mouse_event,
+            scrollback_scroll: ScrollAccumulator::default(),
+            mouse_scroll: ScrollAccumulator::default(),
             selection_start: None,
             focused: false,
             saved_session: None,
@@ -414,6 +473,7 @@ impl Pane {
             .try_send(bytes)
             .map_err(|e| anyhow::anyhow!("PTY input queue: {e}"))?;
         self.terminal.scroll_viewport(ScrollViewport::Bottom);
+        self.scrollback_scroll = ScrollAccumulator::default();
         Ok(())
     }
 
@@ -531,6 +591,12 @@ impl Pane {
     ) -> Result<()> {
         let modifiers = ui.input(|i| i.modifiers);
         let tracking = self.terminal.is_mouse_tracking()? && !modifiers.shift;
+        if !response.hovered() || tracking {
+            self.scrollback_scroll = ScrollAccumulator::default();
+        }
+        if !response.hovered() || !tracking {
+            self.mouse_scroll = ScrollAccumulator::default();
+        }
         let pos = response
             .interact_pointer_pos()
             .or_else(|| ui.input(|i| i.pointer.hover_pos()));
@@ -579,8 +645,9 @@ impl Pane {
                                 mouse::Action::Release
                             })
                             .set_button(Some(button));
-                        self.mouse_encoder
-                            .encode_to_vec(&self.mouse_event, &mut data)?;
+                        input::append_encoded(&mut data, |buffer| {
+                            self.mouse_encoder.encode(&self.mouse_event, buffer)
+                        })?;
                     }
                     egui::Event::PointerMoved(_) => {
                         let button = ui.input(|i| {
@@ -595,20 +662,23 @@ impl Pane {
                         self.mouse_event
                             .set_action(mouse::Action::Motion)
                             .set_button(button);
-                        self.mouse_encoder
-                            .encode_to_vec(&self.mouse_event, &mut data)?;
+                        input::append_encoded(&mut data, |buffer| {
+                            self.mouse_encoder.encode(&self.mouse_event, buffer)
+                        })?;
                     }
-                    egui::Event::MouseWheel { delta, .. } => {
+                    egui::Event::MouseWheel { unit, delta, .. } => {
+                        let rows = self.mouse_scroll.wheel(unit, delta.y, cell.y, self.size.1);
                         self.mouse_event
                             .set_action(mouse::Action::Press)
-                            .set_button(Some(if delta.y > 0.0 {
+                            .set_button(Some(if rows > 0 {
                                 mouse::Button::Four
                             } else {
                                 mouse::Button::Five
                             }));
-                        for _ in 0..3 {
-                            self.mouse_encoder
-                                .encode_to_vec(&self.mouse_event, &mut data)?;
+                        for _ in 0..rows.unsigned_abs() {
+                            input::append_encoded(&mut data, |buffer| {
+                                self.mouse_encoder.encode(&self.mouse_event, buffer)
+                            })?;
                         }
                     }
                     _ => {}
@@ -641,10 +711,9 @@ impl Pane {
             }
             if response.hovered() {
                 let scroll = ui.input(|i| i.raw_scroll_delta.y);
-                if scroll.abs() >= 1.0 {
-                    self.terminal.scroll_viewport(ScrollViewport::Delta(
-                        -(scroll / cell.y).round() as isize,
-                    ));
+                let rows = self.scrollback_scroll.rows(scroll / cell.y);
+                if rows != 0 {
+                    self.terminal.scroll_viewport(ScrollViewport::Delta(-rows));
                 }
             }
         }

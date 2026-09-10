@@ -81,6 +81,54 @@ fn terminal_preserves_unicode_colors_and_application_input_modes() {
 }
 
 #[test]
+fn input_encoding_grows_buffers_without_losing_events() {
+    let term = pane::terminal(&Config::default(), &theme::DEFAULT).unwrap();
+    let mut events = vec![Event::Text("a".into()), Event::Text("123456789".into())];
+    let long_text = "界".repeat(200);
+    events.push(Event::Text(long_text.clone()));
+    for _ in 0..100 {
+        events.push(key(Key::ArrowUp, Modifiers::NONE));
+    }
+    let expected = format!("a123456789{long_text}{}", "\x1b[A".repeat(100));
+    assert_eq!(input::encode(&term, &events).unwrap(), expected.as_bytes());
+}
+
+#[test]
+fn mouse_encoding_appends_when_destination_has_insufficient_spare_capacity() {
+    use libghostty_vt::mouse;
+
+    let mut term = pane::terminal(&Config::default(), &theme::DEFAULT).unwrap();
+    term.vt_write(b"\x1b[?1000h\x1b[?1006h");
+    let mut encoder = mouse::Encoder::new().unwrap();
+    encoder
+        .set_options_from_terminal(&term)
+        .set_size(mouse::EncoderSize {
+            screen_width: 800,
+            screen_height: 600,
+            cell_width: 8,
+            cell_height: 16,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_left: 0,
+            padding_right: 0,
+        });
+    let mut event = mouse::Event::new().unwrap();
+    event
+        .set_action(mouse::Action::Press)
+        .set_button(Some(mouse::Button::Left))
+        .set_position(mouse::Position { x: 0.0, y: 0.0 });
+    let mut out = Vec::with_capacity(16);
+    out.resize(9, b'x');
+    for _ in 0..100 {
+        input::append_encoded(&mut out, |buffer| encoder.encode(&event, buffer)).unwrap();
+    }
+    assert_eq!(
+        out,
+        format!("xxxxxxxxx{}", "\x1b[<0;1;1M".repeat(100)).as_bytes()
+    );
+}
+
+#[test]
 fn queries_return_to_the_pty_and_alternate_screen_restores() {
     let mut term = pane::terminal(&Config::default(), &theme::DEFAULT).unwrap();
     let response = Rc::new(RefCell::new(vec![]));

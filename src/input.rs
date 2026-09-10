@@ -1,6 +1,25 @@
 use anyhow::Result;
 use libghostty_vt::{Terminal, key};
 
+/// Avoid libghostty-vt 0.2.1's encode_to_vec capacity calculation, which can
+/// reserve too little when the destination already has some spare capacity.
+pub fn append_encoded(
+    out: &mut Vec<u8>,
+    mut encode: impl FnMut(&mut [u8]) -> libghostty_vt::error::Result<usize>,
+) -> Result<()> {
+    let mut buffer = [0; 128];
+    match encode(&mut buffer) {
+        Ok(written) => out.extend_from_slice(&buffer[..written]),
+        Err(libghostty_vt::Error::OutOfSpace { required }) => {
+            let mut buffer = vec![0; required];
+            let written = encode(&mut buffer)?;
+            out.extend_from_slice(&buffer[..written]);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
 pub fn mods(m: egui::Modifiers) -> key::Mods {
     let mut out = key::Mods::empty();
     if m.ctrl {
@@ -71,7 +90,7 @@ pub fn encode(terminal: &Terminal<'_, '_>, events: &[egui::Event]) -> Result<Vec
                     })
                     .set_unshifted_codepoint(ucp)
                     .set_utf8(text);
-                encoder.encode_to_vec(&event, &mut out)?;
+                append_encoded(&mut out, |buffer| encoder.encode(&event, buffer))?;
             }
             egui::Event::Text(text) if !used_text.contains(&index) => {
                 event
@@ -81,7 +100,7 @@ pub fn encode(terminal: &Terminal<'_, '_>, events: &[egui::Event]) -> Result<Vec
                     .set_consumed_mods(key::Mods::empty())
                     .set_unshifted_codepoint('\0')
                     .set_utf8(Some(text.as_str()));
-                encoder.encode_to_vec(&event, &mut out)?;
+                append_encoded(&mut out, |buffer| encoder.encode(&event, buffer))?;
             }
             egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
                 out.extend_from_slice(text.as_bytes())
