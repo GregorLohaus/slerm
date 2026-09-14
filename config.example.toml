@@ -64,6 +64,7 @@ floating_max_height = 640
 "Alt+F" = "toggle_floats"
 "Alt+M" = "new_pane"
 "Alt+H" = "focus_left"
+# With floating panes shown, J/K cycle forward/backward through them.
 "Alt+J" = "focus_down"
 "Alt+K" = "focus_up"
 "Alt+L" = "focus_right"

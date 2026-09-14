@@ -152,6 +152,7 @@ pub struct Tab {
     pub floats: Vec<PaneId>,
     pub active: PaneId,
     pub floats_visible: bool,
+    last_active_float: Option<PaneId>,
     pub zoomed: bool,
 }
 
@@ -163,6 +164,7 @@ impl Tab {
             floats: vec![],
             active: pane,
             floats_visible: false,
+            last_active_float: None,
             zoomed: false,
         }
     }
@@ -177,6 +179,9 @@ impl Tab {
     pub fn detach(&mut self, id: PaneId) {
         self.root = self.root.take().and_then(|r| r.remove(id));
         self.floats.retain(|p| *p != id);
+        if self.last_active_float == Some(id) {
+            self.last_active_float = None;
+        }
         if self.floats.is_empty() {
             self.floats_visible = false;
         }
@@ -201,17 +206,29 @@ impl Tab {
         self.floats_visible = !self.floats_visible;
         self.zoomed = false;
         if self.floats_visible {
-            if let Some(id) = self.floats.last() {
-                self.active = *id;
+            if let Some(id) = self
+                .last_active_float
+                .filter(|id| self.floats.contains(id))
+                .or_else(|| self.floats.last().copied())
+            {
+                self.active = id;
             }
-        } else if self.floats.contains(&self.active)
-            && let Some(root) = &self.root
-        {
-            self.active = root.first();
+        } else if self.floats.contains(&self.active) {
+            self.last_active_float = Some(self.active);
+            if let Some(root) = &self.root {
+                self.active = root.first();
+            }
         }
     }
 
     pub fn focus_direction(&mut self, direction: Direction, rects: &[(PaneId, Rect)]) {
+        if self.floats_visible
+            && !self.floats.is_empty()
+            && matches!(direction, Direction::Down | Direction::Up)
+        {
+            self.cycle(matches!(direction, Direction::Up));
+            return;
+        }
         let Some((_, source)) = rects
             .iter()
             .find(|(id, _)| *id == self.active && self.is_visible(*id))
@@ -323,6 +340,51 @@ mod tests {
     }
 
     #[test]
+    fn showing_floats_restores_the_pane_active_when_hidden() {
+        let mut tab = Tab::new(1, 1);
+        tab.root.as_mut().unwrap().split(1, 2, Axis::Horizontal);
+        tab.floats = vec![3, 4, 5];
+        tab.toggle_floats();
+        assert_eq!(tab.active, 5);
+        tab.cycle(true);
+        assert_eq!(tab.active, 4);
+
+        tab.toggle_floats();
+        assert_eq!(tab.active, 1);
+        tab.cycle(false);
+        assert_eq!(tab.active, 2);
+        tab.toggle_floats();
+        assert_eq!(tab.active, 4);
+
+        tab.cycle(true);
+        tab.toggle_floats();
+        tab.toggle_floats();
+        assert_eq!(tab.active, 3);
+
+        tab.root = None;
+        tab.toggle_floats();
+        tab.toggle_floats();
+        assert_eq!(tab.active, 3);
+    }
+
+    #[test]
+    fn showing_floats_falls_back_when_remembered_pane_is_detached() {
+        for dock in [false, true] {
+            let mut tab = Tab::new(1, 1);
+            tab.floats = vec![2, 3];
+            tab.floats_visible = true;
+            tab.active = 2;
+            tab.toggle_floats();
+            tab.detach(2);
+            if dock {
+                tab.root.as_mut().unwrap().split(1, 2, Axis::Horizontal);
+            }
+            tab.toggle_floats();
+            assert_eq!(tab.active, 3);
+        }
+    }
+
+    #[test]
     fn directional_focus_uses_geometry_and_ignores_hidden_or_foreign_panes() {
         let mut tab = Tab::new(1, 1);
         let root = tab.root.as_mut().unwrap();
@@ -376,6 +438,30 @@ mod tests {
     }
 
     #[test]
+    fn up_and_down_cycle_visible_floats_without_geometry() {
+        let mut tab = Tab::new(1, 1);
+        tab.floats = vec![2, 3, 4];
+        tab.floats_visible = true;
+        for (direction, expected) in [
+            (Direction::Down, 2),
+            (Direction::Down, 3),
+            (Direction::Down, 4),
+            (Direction::Down, 2),
+            (Direction::Up, 4),
+            (Direction::Up, 3),
+            (Direction::Up, 2),
+        ] {
+            tab.focus_direction(direction, &[]);
+            assert_eq!(tab.active, expected);
+        }
+
+        tab.toggle_floats();
+        assert_eq!(tab.active, 1);
+        tab.toggle_floats();
+        assert_eq!(tab.active, 2);
+    }
+
+    #[test]
     fn visible_floats_constrain_directional_and_cyclic_navigation() {
         let mut tab = Tab::new(1, 1);
         tab.root.as_mut().unwrap().split(1, 2, Axis::Horizontal);
@@ -395,6 +481,8 @@ mod tests {
             (Direction::Right, 4),
             (Direction::Down, 5),
             (Direction::Left, 6),
+            (Direction::Up, 5),
+            (Direction::Up, 4),
             (Direction::Up, 3),
         ] {
             tab.focus_direction(direction, &rects);

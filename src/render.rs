@@ -9,12 +9,14 @@ use libghostty_vt::{
     kitty::graphics::{DecodePng, DecodedImage, ImageFormat, Layer, PlacementIterator},
     render::{CellIterator, Colors, CursorVisualStyle, Dirty, RowIterator},
     screen::CellWide,
-    style::{RgbColor, Underline},
+    style::{RgbColor, Style, Underline},
+    terminal::Mode,
 };
 use std::{
     collections::{HashMap, HashSet},
     io::Cursor,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 /// Where a pane's terminal is drawn this frame, and the colors that are slerm's
@@ -143,6 +145,23 @@ struct CachedRow {
     backgrounds: Vec<egui::Shape>,
     foregrounds: Vec<egui::Shape>,
     selection: Option<(u16, u16)>,
+    cells: Vec<CachedCell>,
+}
+
+#[derive(PartialEq)]
+struct CellAppearance {
+    text: String,
+    style: Style,
+    fg: Color32,
+    bg: Color32,
+    background: bool,
+    wide: CellWide,
+}
+
+struct CachedCell {
+    appearance: CellAppearance,
+    backgrounds: std::ops::Range<usize>,
+    foregrounds: std::ops::Range<usize>,
 }
 
 fn layout_glyph(painter: &Painter, text: String, font: &FontId, height: f32) -> Arc<egui::Galley> {
@@ -205,8 +224,12 @@ pub struct Renderer {
     cached_selection: (Color32, Color32),
     cached_cell: egui::Vec2,
     cached_cols: u16,
+    frame: Vec<egui::epaint::ClippedShape>,
+    sync_started: Option<Instant>,
     #[cfg(test)]
     rebuilt_rows: usize,
+    #[cfg(test)]
+    rebuilt_cells: usize,
 }
 
 impl Renderer {
@@ -225,8 +248,12 @@ impl Renderer {
             cached_selection: (Color32::PLACEHOLDER, Color32::PLACEHOLDER),
             cached_cell: egui::Vec2::ZERO,
             cached_cols: 0,
+            frame: Vec::new(),
+            sync_started: None,
             #[cfg(test)]
             rebuilt_rows: 0,
+            #[cfg(test)]
+            rebuilt_cells: 0,
         })
     }
 
@@ -256,9 +283,26 @@ impl Renderer {
         if fonts_changed {
             self.row_cache.clear();
             self.glyphs.clear();
+            self.frame.clear();
         }
         self.font_marker = Some(marker);
         self.cached_cell = cell;
+        // Editors may clear and redraw in separate PTY reads. Keep presenting
+        // the last complete frame until DEC synchronized output ends. Bound
+        // the wait so a crashed application cannot leave the display frozen.
+        if term.mode(Mode::SYNC_OUTPUT)? {
+            let elapsed = self.sync_started.get_or_insert_with(Instant::now).elapsed();
+            let timeout = Duration::from_secs(1);
+            if elapsed < timeout && !self.frame.is_empty() {
+                painter.ctx().request_repaint_after(timeout - elapsed);
+                self.present(&painter, rect);
+                return Ok(());
+            }
+        } else {
+            self.sync_started = None;
+        }
+        let screen_rect = rect;
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, rect.size());
         let style_fonts = painter.ctx().fonts(|fonts| {
             [(false, false), (true, false), (false, true), (true, true)].map(|(bold, italic)| {
                 let family = crate::fonts::family(bold, italic);
@@ -304,7 +348,8 @@ impl Renderer {
         self.cached_colors = Some(colors.clone());
         self.cached_selection = selected_colors;
         self.cached_cols = cols;
-        painter.rect_filled(rect, 0, color(colors.background));
+        let mut shapes = vec![egui::Shape::rect_filled(rect, 0, color(colors.background))];
+        let mut cursor_shapes = Vec::new();
         let mut rows = self.rows.update(&snapshot)?;
         let mut text = String::new();
         let mut y = 0;
@@ -343,72 +388,103 @@ impl Renderer {
                 if selected {
                     (bg, fg) = selected_colors;
                 }
-                if explicit_bg.is_some() || style.inverse || selected {
-                    backgrounds.push(egui::Shape::rect_filled(cell_rect, 0, bg));
-                }
                 if style.faint {
                     fg = fg.gamma_multiply(0.6);
                 }
                 let wide = c.raw_cell()?.wide()?;
-                if !style.invisible
-                    && !matches!(wide, CellWide::SpacerHead | CellWide::SpacerTail)
-                    && c.graphemes_len()? > 0
+                text.clear();
+                c.graphemes_utf8(&mut text)?;
+                let appearance = CellAppearance {
+                    text: text.clone(),
+                    style,
+                    fg,
+                    bg,
+                    background: explicit_bg.is_some() || style.inverse || selected,
+                    wide,
+                };
+                // Dirty flags are row-granular. Compare cells so edits in one
+                // split don't rebuild its unchanged neighbor on the same row.
+                let background_start = backgrounds.len();
+                let foreground_start = foregrounds.len();
+                if let Some(old) = self.row_cache[y].cells.get(x)
+                    && old.appearance == appearance
                 {
-                    c.graphemes_utf8(&mut text)?;
-                    // Placeholder cells are reserved by the Kitty protocol, not printable text.
-                    if let Some(separator) = powerline_shape(&text, cell_rect, fg) {
-                        foregrounds.push(separator);
-                    } else if text != " " && !text.starts_with('\u{10eeee}') {
-                        let index = usize::from(style.bold) + 2 * usize::from(style.italic);
-                        let icon = nerd_icon(&text);
-                        let key = (text.clone(), style.bold, style.italic);
-                        let galley = if let Some(galley) = self.glyphs.get(&key) {
-                            galley.clone()
-                        } else {
-                            let font = &style_fonts[index];
-                            let galley = layout_styled_glyph(
-                                &painter,
-                                text.clone(),
-                                font,
-                                cell.y,
-                                synthetic[index].1 && !icon,
-                            );
-                            self.glyphs.insert(key, galley.clone());
-                            galley
-                        };
-                        // Keep style emphasis for regular-only fonts; real style
-                        // faces are drawn once. Never distort symbol outlines.
-                        if synthetic[index].0 && !icon {
-                            foregrounds.push(egui::Shape::galley(
-                                pos + vec2(0.45, 0.0),
-                                galley.clone(),
-                                fg,
+                    backgrounds
+                        .extend_from_slice(&self.row_cache[y].backgrounds[old.backgrounds.clone()]);
+                    foregrounds
+                        .extend_from_slice(&self.row_cache[y].foregrounds[old.foregrounds.clone()]);
+                } else {
+                    #[cfg(test)]
+                    {
+                        self.rebuilt_cells += 1;
+                    }
+                    if appearance.background {
+                        backgrounds.push(egui::Shape::rect_filled(cell_rect, 0, bg));
+                    }
+                    if !style.invisible
+                        && !matches!(wide, CellWide::SpacerHead | CellWide::SpacerTail)
+                        && c.graphemes_len()? > 0
+                    {
+                        // Placeholder cells are reserved by the Kitty protocol, not printable text.
+                        if let Some(separator) = powerline_shape(&text, cell_rect, fg) {
+                            foregrounds.push(separator);
+                        } else if text != " " && !text.starts_with('\u{10eeee}') {
+                            let index = usize::from(style.bold) + 2 * usize::from(style.italic);
+                            let icon = nerd_icon(&text);
+                            let key = (text.clone(), style.bold, style.italic);
+                            let galley = if let Some(galley) = self.glyphs.get(&key) {
+                                galley.clone()
+                            } else {
+                                let font = &style_fonts[index];
+                                let galley = layout_styled_glyph(
+                                    &painter,
+                                    text.clone(),
+                                    font,
+                                    cell.y,
+                                    synthetic[index].1 && !icon,
+                                );
+                                self.glyphs.insert(key, galley.clone());
+                                galley
+                            };
+                            // Keep style emphasis for regular-only fonts; real style
+                            // faces are drawn once. Never distort symbol outlines.
+                            if synthetic[index].0 && !icon {
+                                foregrounds.push(egui::Shape::galley(
+                                    pos + vec2(0.45, 0.0),
+                                    galley.clone(),
+                                    fg,
+                                ));
+                            }
+                            foregrounds.push(if icon {
+                                let width = if wide == CellWide::Wide { 2.0 } else { 1.0 };
+                                icon_shape(
+                                    galley,
+                                    Rect::from_min_size(pos, vec2(cell.x * width, cell.y)),
+                                    fg,
+                                )
+                            } else {
+                                egui::Shape::galley(pos, galley, fg)
+                            });
+                        }
+                    }
+                    for (enabled, height) in [
+                        (style.underline != Underline::None, cell.y - 2.0),
+                        (style.strikethrough, cell.y * 0.55),
+                        (style.overline, 1.0),
+                    ] {
+                        if enabled {
+                            foregrounds.push(egui::Shape::line_segment(
+                                [pos + vec2(0.0, height), pos + vec2(cell.x, height)],
+                                Stroke::new(1.0_f32, fg),
                             ));
                         }
-                        foregrounds.push(if icon {
-                            let width = if wide == CellWide::Wide { 2.0 } else { 1.0 };
-                            icon_shape(
-                                galley,
-                                Rect::from_min_size(pos, vec2(cell.x * width, cell.y)),
-                                fg,
-                            )
-                        } else {
-                            egui::Shape::galley(pos, galley, fg)
-                        });
                     }
                 }
-                for (enabled, height) in [
-                    (style.underline != Underline::None, cell.y - 2.0),
-                    (style.strikethrough, cell.y * 0.55),
-                    (style.overline, 1.0),
-                ] {
-                    if enabled {
-                        foregrounds.push(egui::Shape::line_segment(
-                            [pos + vec2(0.0, height), pos + vec2(cell.x, height)],
-                            Stroke::new(1.0_f32, fg),
-                        ));
-                    }
-                }
+                cached.cells.push(CachedCell {
+                    appearance,
+                    backgrounds: background_start..backgrounds.len(),
+                    foregrounds: foreground_start..foregrounds.len(),
+                });
                 x += 1;
             }
             self.row_cache[y] = cached;
@@ -419,7 +495,7 @@ impl Renderer {
         let mut seen = HashSet::new();
         for layer in [Layer::BelowBg, Layer::BelowText, Layer::AboveText] {
             if layer == Layer::BelowText {
-                painter.extend(
+                shapes.extend(
                     self.row_cache
                         .iter()
                         .flat_map(|row| row.backgrounds.iter())
@@ -431,7 +507,7 @@ impl Renderer {
                 );
             }
             if layer == Layer::AboveText {
-                painter.extend(
+                shapes.extend(
                     self.row_cache
                         .iter()
                         .flat_map(|row| row.foregrounds.iter())
@@ -451,6 +527,7 @@ impl Renderer {
                 &mut self.placements,
                 &mut self.textures,
                 &mut seen,
+                &mut shapes,
             )?;
         }
         self.textures.retain(|id, _| seen.contains(id));
@@ -465,20 +542,18 @@ impl Renderer {
             match snapshot.cursor_visual_style()? {
                 CursorVisualStyle::Bar if active => {
                     cursor_rect.max.x = cursor_rect.min.x + 2.0;
-                    painter.rect_filled(cursor_rect, 0, c);
+                    shapes.push(egui::Shape::rect_filled(cursor_rect, 0, c));
                 }
                 CursorVisualStyle::Underline if active => {
                     cursor_rect.min.y = cursor_rect.max.y - 2.0;
-                    painter.rect_filled(cursor_rect, 0, c);
+                    shapes.push(egui::Shape::rect_filled(cursor_rect, 0, c));
                 }
                 CursorVisualStyle::Block if active => {
-                    painter.rect_filled(cursor_rect, 0, c);
+                    shapes.push(egui::Shape::rect_filled(cursor_rect, 0, c));
                     // Redraw the covered glyph in the background color so an
                     // application's solid block cursor leaves text readable.
                     let ink = color(colors.background);
-                    let cursor_painter =
-                        painter.with_clip_rect(cursor_rect.intersect(painter.clip_rect()));
-                    cursor_painter.extend(
+                    cursor_shapes.extend(
                         self.row_cache[cursor.y as usize]
                             .foregrounds
                             .iter()
@@ -493,22 +568,47 @@ impl Renderer {
                                         }
                                     },
                                 );
-                                shape
+                                egui::epaint::ClippedShape {
+                                    clip_rect: cursor_rect.intersect(rect),
+                                    shape,
+                                }
                             }),
                     );
                 }
                 _ => {
-                    painter.rect_stroke(
+                    shapes.push(egui::Shape::rect_stroke(
                         cursor_rect,
                         theme::CURSOR_CORNER_RADIUS,
                         Stroke::new(theme::BORDER_WIDTH, c),
                         egui::StrokeKind::Inside,
-                    );
+                    ));
                 }
             }
         }
         snapshot.set_dirty(Dirty::Clean)?;
+        self.frame = shapes
+            .into_iter()
+            .map(|shape| egui::epaint::ClippedShape {
+                clip_rect: rect,
+                shape,
+            })
+            .chain(cursor_shapes)
+            .collect();
+        self.present(&painter, screen_rect);
         Ok(())
+    }
+
+    fn present(&self, painter: &Painter, rect: Rect) {
+        for cached in &self.frame {
+            let mut shape = cached.shape.clone();
+            shape.translate(rect.min.to_vec2());
+            let clip = cached
+                .clip_rect
+                .translate(rect.min.to_vec2())
+                .intersect(rect)
+                .intersect(painter.clip_rect());
+            painter.with_clip_rect(clip).add(shape);
+        }
     }
 }
 
@@ -522,6 +622,7 @@ fn paint_images(
     iterator: &mut PlacementIterator<'_>,
     textures: &mut HashMap<u32, (u64, TextureHandle)>,
     seen: &mut HashSet<u32>,
+    shapes: &mut Vec<egui::Shape>,
 ) -> Result<()> {
     let graphics = term.kitty_graphics()?;
     let mut placements = iterator.update(&graphics)?;
@@ -596,7 +697,12 @@ fn paint_images(
     }
     images.sort_by_key(|(z, id, pid, _, _)| (*z, *id, *pid));
     for (_, id, _, dest, uv) in images {
-        painter.image(textures[&id].1.id(), dest, uv, Color32::WHITE);
+        shapes.push(egui::Shape::image(
+            textures[&id].1.id(),
+            dest,
+            uv,
+            Color32::WHITE,
+        ));
     }
     Ok(())
 }
@@ -705,6 +811,69 @@ mod tests {
                 .unwrap();
         })
         .shapes
+    }
+
+    #[test]
+    fn scrolling_one_editor_split_reuses_unchanged_cells() {
+        let ctx = egui::Context::default();
+        let mut term =
+            crate::pane::terminal(&crate::config::Config::default(), &theme::DEFAULT).unwrap();
+        term.resize(20, 5, 8, 16).unwrap();
+        term.vt_write(b"\x1b[?25l");
+        for row in 1..=5 {
+            term.vt_write(format!("\x1b[{row};1Hleft {row}    right {row}").as_bytes());
+        }
+        let rect = Rect::from_min_size(pos2(12.0, 24.0), vec2(200.0, 120.0));
+        let font = FontId::monospace(16.0);
+        let mut renderer = Renderer::new().unwrap();
+        frame(&ctx, &mut renderer, &term, rect, &font);
+        assert_eq!(renderer.rebuilt_cells, 100);
+
+        // Simulate an editor repainting entire rows while only its left split changes.
+        for row in 1..=5 {
+            term.vt_write(format!("\x1b[{row};1Hleft {}    right {row}", row + 1).as_bytes());
+        }
+        let actual = frame(&ctx, &mut renderer, &term, rect, &font);
+        assert_eq!(renderer.rebuilt_cells, 105, "only five digits changed");
+        assert_eq!(
+            actual,
+            frame(&ctx, &mut Renderer::new().unwrap(), &term, rect, &font)
+        );
+        // Rewriting identical text should reuse every cell, even on dirty rows.
+        term.vt_write(b"\x1b[1;1Hleft 2    right 1");
+        frame(&ctx, &mut renderer, &term, rect, &font);
+        assert_eq!(renderer.rebuilt_cells, 105);
+    }
+
+    #[test]
+    fn synchronized_updates_keep_the_last_complete_frame() {
+        let ctx = egui::Context::default();
+        let mut term =
+            crate::pane::terminal(&crate::config::Config::default(), &theme::DEFAULT).unwrap();
+        term.resize(20, 5, 8, 16).unwrap();
+        term.vt_write(b"\x1b[?25lleft buffer\r\nright buffer");
+        let rect = Rect::from_min_size(pos2(12.0, 24.0), vec2(200.0, 120.0));
+        let font = FontId::monospace(16.0);
+        let mut renderer = Renderer::new().unwrap();
+        let initial = frame(&ctx, &mut renderer, &term, rect, &font);
+        let cells = renderer.rebuilt_cells;
+        term.vt_write(b"\x1b[?2026h\x1b[2J\x1b[Hpartial");
+        assert!(term.mode(Mode::SYNC_OUTPUT).unwrap());
+        assert_eq!(initial, frame(&ctx, &mut renderer, &term, rect, &font));
+        assert_eq!(renderer.rebuilt_cells, cells);
+        term.vt_write(b"\rcomplete\r\nright buffer\x1b[?2026l");
+        let completed = frame(&ctx, &mut renderer, &term, rect, &font);
+        assert_ne!(initial, completed);
+        assert_eq!(
+            completed,
+            frame(&ctx, &mut Renderer::new().unwrap(), &term, rect, &font)
+        );
+
+        // A missing end marker must not freeze the terminal indefinitely.
+        term.vt_write(b"\x1b[?2026h\x1b[Htimeout");
+        assert_eq!(completed, frame(&ctx, &mut renderer, &term, rect, &font));
+        renderer.sync_started = Some(Instant::now() - Duration::from_secs(2));
+        assert_ne!(completed, frame(&ctx, &mut renderer, &term, rect, &font));
     }
 
     #[test]
