@@ -504,23 +504,28 @@ impl eframe::App for App {
                 let pane = self.panes.get_mut(&id).unwrap();
                 let window_id = egui::Id::new(("float", tab.id, id));
                 let active = tab.active == id;
-                let (pos, size) = float_placement(workspace, index, &self.config.multiplexer);
-                let result = egui::Window::new(pane_title(id, pane))
+                let window = egui::Window::new(pane_title(id, pane))
                     .id(window_id)
                     .title_bar(false)
                     .constrain_to(workspace)
-                    .default_pos(pos)
-                    .default_size(size)
                     .min_size(vec2(160.0, 100.0))
-                    .frame(egui::Frame::NONE.fill(bg))
-                    .show(ctx, |ui| {
-                        let rect = ui.available_rect_before_wrap();
-                        ui.allocate_rect(rect, egui::Sense::hover());
-                        pane.last_rect = rect;
-                        if show_pane(ui, id, pane, rect, &self.config, &self.theme, active) {
-                            tab.active = id;
-                        }
-                    });
+                    .frame(egui::Frame::NONE.fill(bg));
+                let result = position_float(
+                    ctx,
+                    window,
+                    window_id,
+                    index,
+                    workspace,
+                    &self.config.multiplexer,
+                )
+                .show(ctx, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    ui.allocate_rect(rect, egui::Sense::hover());
+                    pane.last_rect = rect;
+                    if show_pane(ui, id, pane, rect, &self.config, &self.theme, active) {
+                        tab.active = id;
+                    }
+                });
                 if let Some(result) = result
                     && result.response.contains_pointer()
                     && ctx.input(|i| i.pointer.any_pressed())
@@ -661,7 +666,7 @@ fn show_pane(
 /// Where a floating pane opens, from its place in the tab's float list rather than
 /// its pane id: the first one is centred and every later one steps down and right
 /// from it, so the same slot always lands in the same spot. The cascade wraps
-/// before it can walk a float off the far edge.
+/// every six panes, with each new stack shifted slightly to the right.
 fn float_placement(
     workspace: Rect,
     index: usize,
@@ -671,8 +676,43 @@ fn float_placement(
     // terminal far more room than it needs; the maximums keep it in hand.
     let size = (workspace.size() * vec2(config.floating_width, config.floating_height))
         .min(vec2(config.floating_max_width, config.floating_max_height));
+    (workspace.center() - size / 2.0 + float_offset(index), size)
+}
+
+fn float_offset(index: usize) -> egui::Vec2 {
     let step = (index % 6) as f32 * 28.0;
-    (workspace.center() - size / 2.0 + vec2(step, step), size)
+    let stack = (index / 6) as f32 * 12.0;
+    vec2(step + stack, step)
+}
+
+/// Reapply the cascade when a pane changes slots or the workspace resizes.
+/// Otherwise leave egui's remembered position alone so panes can still be dragged.
+fn position_float<'a>(
+    ctx: &egui::Context,
+    window: egui::Window<'a>,
+    window_id: egui::Id,
+    index: usize,
+    workspace: Rect,
+    config: &config::Multiplexer,
+) -> egui::Window<'a> {
+    let (pos, size) = float_placement(workspace, index, config);
+    let window = window.default_pos(pos).default_size(size);
+    let changed = ctx.data_mut(|data| {
+        let key = window_id.with("cascade placement");
+        let placement = (index, workspace);
+        let previous = data.get_temp::<(usize, Rect)>(key);
+        data.insert_temp(key, placement);
+        previous.is_some_and(|previous| previous != placement)
+    });
+    if changed {
+        // Center using the remembered size, including user resizing.
+        let size = egui::AreaState::load(ctx, window_id)
+            .and_then(|state| state.size)
+            .unwrap_or(size);
+        window.current_pos(workspace.center() - size / 2.0 + float_offset(index))
+    } else {
+        window
+    }
 }
 
 fn pane_title(id: PaneId, pane: &Pane) -> String {
@@ -750,6 +790,80 @@ mod tests {
     }
 
     #[test]
+    fn removing_floats_repositions_survivors_in_cycle_order() {
+        let ctx = egui::Context::default();
+        let config = config::Multiplexer::default();
+        let workspace = Rect::from_min_size(egui::Pos2::ZERO, vec2(1600.0, 1200.0));
+        let mut tab = Tab::new(1, 1);
+        tab.floats = vec![2, 3, 4, 5];
+        tab.floats_visible = true;
+        let render = |tab: &Tab, moved: Option<PaneId>, workspace: Rect| {
+            let mut positions = BTreeMap::new();
+            // Allow egui's initial sizing pass to settle.
+            for _ in 0..3 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(workspace),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        for (index, &id) in tab.floats.iter().enumerate() {
+                            let window_id = egui::Id::new(("float", tab.id, id));
+                            let mut window = egui::Window::new(id.to_string())
+                                .id(window_id)
+                                .title_bar(false)
+                                .frame(egui::Frame::NONE);
+                            if moved == Some(id) {
+                                window = window.current_pos(egui::pos2(100.0, 100.0));
+                            }
+                            let response =
+                                position_float(ctx, window, window_id, index, workspace, &config)
+                                    .show(ctx, |ui| {
+                                        ui.allocate_rect(
+                                            ui.available_rect_before_wrap(),
+                                            egui::Sense::hover(),
+                                        );
+                                    })
+                                    .unwrap();
+                            positions.insert(id, response.response.rect.min);
+                        }
+                    },
+                );
+            }
+            positions
+        };
+        render(&tab, Some(2), workspace);
+        assert_eq!(render(&tab, None, workspace)[&2], egui::pos2(100.0, 100.0));
+        // Resizing recenters even a dragged pane, using its existing size.
+        let resized = Rect::from_min_size(egui::Pos2::ZERO, vec2(1800.0, 1400.0));
+        let positions = render(&tab, None, resized);
+        for (index, &id) in tab.floats.iter().enumerate() {
+            assert_eq!(positions[&id], float_placement(resized, index, &config).0);
+        }
+        render(&tab, None, workspace);
+        render(&tab, Some(2), workspace);
+        // Remove the middle pane, then the first, then append a new float.
+        for (removed, added) in [(3, None), (2, None), (4, Some(6))] {
+            tab.detach(removed);
+            if let Some(id) = added {
+                tab.floats.push(id);
+            }
+            let positions = render(&tab, None, workspace);
+            tab.active = tab.floats[0];
+            for index in 0..tab.floats.len() {
+                let expected = if tab.active == 2 {
+                    egui::pos2(100.0, 100.0)
+                } else {
+                    float_placement(workspace, index, &config).0
+                };
+                assert_eq!(positions[&tab.active], expected);
+                tab.cycle(false);
+            }
+            assert_eq!(tab.active, tab.floats[0]);
+        }
+    }
+
+    #[test]
     fn floats_open_centered_then_cascade_and_stay_within_the_maximums() {
         let config = config::Multiplexer::default();
         let workspace = Rect::from_min_size(egui::pos2(0.0, 30.0), vec2(3000.0, 1800.0));
@@ -770,9 +884,19 @@ mod tests {
             second.x > first.x && second.y > first.y,
             "later floats step off it"
         );
-        // Six slots later the cascade is back where it started, so it cannot walk away.
-        assert_eq!(float_placement(workspace, 6, &config).0, first);
-        assert_eq!(float_placement(workspace, 7, &config).0, second);
+        // Each group of six restarts the cascade slightly to the right.
+        assert_eq!(
+            float_placement(workspace, 6, &config).0,
+            first + vec2(12.0, 0.0)
+        );
+        assert_eq!(
+            float_placement(workspace, 7, &config).0,
+            second + vec2(12.0, 0.0)
+        );
+        assert_eq!(
+            float_placement(workspace, 12, &config).0,
+            first + vec2(24.0, 0.0)
+        );
 
         // A small workspace keeps the fractions instead of the maximums.
         let small = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0));

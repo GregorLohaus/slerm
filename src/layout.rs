@@ -152,7 +152,8 @@ pub struct Tab {
     pub floats: Vec<PaneId>,
     pub active: PaneId,
     pub floats_visible: bool,
-    last_active_float: Option<PaneId>,
+    // Remember both focus and zoom while floating panes are hidden.
+    last_active_float: Option<(PaneId, bool)>,
     pub zoomed: bool,
 }
 
@@ -179,7 +180,7 @@ impl Tab {
     pub fn detach(&mut self, id: PaneId) {
         self.root = self.root.take().and_then(|r| r.remove(id));
         self.floats.retain(|p| *p != id);
-        if self.last_active_float == Some(id) {
+        if self.last_active_float.is_some_and(|(pane, _)| pane == id) {
             self.last_active_float = None;
         }
         if self.floats.is_empty() {
@@ -204,17 +205,18 @@ impl Tab {
 
     pub fn toggle_floats(&mut self) {
         self.floats_visible = !self.floats_visible;
-        self.zoomed = false;
+        let was_zoomed = std::mem::take(&mut self.zoomed);
         if self.floats_visible {
-            if let Some(id) = self
+            if let Some((id, zoomed)) = self
                 .last_active_float
-                .filter(|id| self.floats.contains(id))
-                .or_else(|| self.floats.last().copied())
+                .filter(|(id, _)| self.floats.contains(id))
+                .or_else(|| self.floats.last().map(|id| (*id, false)))
             {
                 self.active = id;
+                self.zoomed = zoomed;
             }
         } else if self.floats.contains(&self.active) {
-            self.last_active_float = Some(self.active);
+            self.last_active_float = Some((self.active, was_zoomed));
             if let Some(root) = &self.root {
                 self.active = root.first();
             }
@@ -374,6 +376,7 @@ mod tests {
             tab.floats = vec![2, 3];
             tab.floats_visible = true;
             tab.active = 2;
+            tab.zoomed = true;
             tab.toggle_floats();
             tab.detach(2);
             if dock {
@@ -381,7 +384,55 @@ mod tests {
             }
             tab.toggle_floats();
             assert_eq!(tab.active, 3);
+            assert!(!tab.zoomed);
         }
+    }
+
+    #[test]
+    fn showing_floats_restores_zoom_without_zooming_tiles() {
+        let mut tab = Tab::new(1, 1);
+        tab.root.as_mut().unwrap().split(1, 2, Axis::Horizontal);
+        tab.floats = vec![3, 4];
+        tab.floats_visible = true;
+        tab.active = 3;
+        tab.zoomed = true;
+
+        for _ in 0..2 {
+            tab.toggle_floats();
+            assert_eq!(tab.active, 1);
+            assert!(!tab.zoomed);
+            assert!(!tab.is_visible(3));
+            tab.cycle(false);
+            assert_eq!(tab.active, 2);
+            tab.toggle_floats();
+            assert_eq!(tab.active, 3);
+            assert!(tab.zoomed);
+        }
+
+        // Unzooming the float replaces its remembered zoom, even if tiles zoom.
+        tab.zoomed = false;
+        tab.toggle_floats();
+        tab.zoomed = true;
+        tab.toggle_floats();
+        assert_eq!(tab.active, 3);
+        assert!(!tab.zoomed);
+    }
+
+    #[test]
+    fn floating_zoom_survives_hiding_without_tiles() {
+        let mut tab = Tab::new(1, 1);
+        tab.root = None;
+        tab.floats = vec![1];
+        tab.floats_visible = true;
+        tab.zoomed = true;
+
+        tab.toggle_floats();
+        assert!(!tab.is_visible(1));
+        assert!(!tab.zoomed);
+        tab.toggle_floats();
+        assert_eq!(tab.active, 1);
+        assert!(tab.is_visible(1));
+        assert!(tab.zoomed);
     }
 
     #[test]
