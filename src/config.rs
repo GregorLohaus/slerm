@@ -34,6 +34,15 @@ pub struct Config {
     pub kitty: Kitty,
     pub multiplexer: Multiplexer,
     pub keys: BTreeMap<String, Action>,
+    pub plugins: Vec<Plugin>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Plugin {
+    pub id: String,
+    /// JavaScript bundle path, relative to the config file.
+    pub path: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -55,7 +64,7 @@ pub struct Multiplexer {
     pub floating_max_height: f32,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     SplitRight,
@@ -127,6 +136,7 @@ impl Default for Config {
             colors: BTreeMap::new(),
             kitty: Kitty::default(),
             multiplexer: Multiplexer::default(),
+            plugins: Vec::new(),
             keys: [
                 ("Alt+F", Action::ToggleFloats),
                 ("Alt+M", Action::NewPane),
@@ -174,6 +184,18 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Self> {
         let config: Self = toml::from_str(text)?;
+        let mut plugin_ids = std::collections::HashSet::new();
+        for plugin in &config.plugins {
+            ensure!(
+                crate::plugins::valid_id(&plugin.id) && plugin_ids.insert(&plugin.id),
+                "plugin ids must be unique and contain only letters, digits, '.', '-' or '_'"
+            );
+            ensure!(
+                !plugin.path.as_os_str().is_empty(),
+                "plugin {} needs a bundle path",
+                plugin.id
+            );
+        }
         ensure!(
             config.font_path.is_none() || config.font_family.is_none(),
             "set either font_family or font_path, not both"

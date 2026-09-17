@@ -78,3 +78,10 @@ floating_max_height = 640
 "Ctrl+Shift+R" = "reload_config"
 "Ctrl+Shift+C" = "copy"
 "Ctrl+Shift+V" = "paste"
+
+# TypeScript plugins compile to JavaScript bundles and run in embedded Boa.
+# See sdk/README.md. Relative paths resolve beside this configuration file.
+# Restart Slerm after changing a plugin bundle or these entries.
+# [[plugins]]
+# id = "workspace"
+# path = "plugins/workspace.js"

@@ -3,6 +3,8 @@ use crate::{
     input,
     layout::{Axis, Direction, Layout, PaneId, Tab},
     pane::{self, Pane},
+    plugin_api::{Event, Operation, PaneState, State, TabState},
+    plugins::{self, Host},
     theme::{self, Theme},
 };
 use anyhow::{Result, ensure};
@@ -22,6 +24,7 @@ pub struct App {
     next_id: u64,
     error: Option<String>,
     suppressed: HashSet<egui::Key>,
+    plugins: Host,
 }
 
 /// Width kept free at the left of the tab bar for the macOS traffic lights,
@@ -69,6 +72,11 @@ impl App {
         cc.egui_ctx.set_visuals(theme.visuals());
         cc.egui_ctx.set_fonts(fonts(&config)?);
         let pane = Pane::new(&config, &theme, &cc.egui_ctx, None)?;
+        let config_dir = config_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let (plugins, errors) = Host::start(&config.plugins, config_dir, &cc.egui_ctx);
         Ok(Self {
             config,
             theme,
@@ -77,8 +85,9 @@ impl App {
             tabs: vec![Tab::new(1, 1)],
             current: 0,
             next_id: 2,
-            error: None,
+            error: (!errors.is_empty()).then(|| errors.join("\n")),
             suppressed: HashSet::new(),
+            plugins,
         })
     }
 
@@ -292,6 +301,175 @@ impl App {
         }
     }
 
+    fn plugin_state(&self) -> State {
+        State {
+            active_tab: self.tabs.get(self.current).map(|tab| tab.id),
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| TabState {
+                    id: tab.id,
+                    active_pane: tab.active,
+                    floats_visible: tab.floats_visible,
+                    zoomed: tab.zoomed,
+                    panes: tab
+                        .ids()
+                        .iter()
+                        .map(|id| PaneState {
+                            id: *id,
+                            floating: tab.floats.contains(id),
+                            title: self.panes[id].terminal.title().unwrap_or("").into(),
+                            exited: self.panes[id].dead,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    fn plugin_request(
+        &mut self,
+        index: usize,
+        operation: Operation,
+        ctx: &egui::Context,
+    ) -> Result<serde_json::Value> {
+        use serde_json::json;
+        match operation {
+            Operation::GetState {} => return Ok(serde_json::to_value(self.plugin_state())?),
+            Operation::Execute { action } => {
+                ensure!(!self.tabs.is_empty(), "no active tab");
+                self.action(action, ctx)?;
+            }
+            Operation::FocusPane { pane } => {
+                let index = self
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.ids().contains(&pane))
+                    .ok_or_else(|| anyhow::anyhow!("unknown pane {pane}"))?;
+                self.current = index;
+                let tab = &mut self.tabs[index];
+                tab.active = pane;
+                tab.floats_visible = tab.floats.contains(&pane);
+            }
+            Operation::FocusTab { tab } => {
+                self.current = self
+                    .tabs
+                    .iter()
+                    .position(|candidate| candidate.id == tab)
+                    .ok_or_else(|| anyhow::anyhow!("unknown tab {tab}"))?;
+            }
+            Operation::ReadTerminal { pane } => {
+                use libghostty_vt::fmt::{Formatter, FormatterOptions};
+                let pane = self
+                    .panes
+                    .get(&pane)
+                    .ok_or_else(|| anyhow::anyhow!("unknown pane {pane}"))?;
+                let bytes = Formatter::new(
+                    &pane.terminal,
+                    FormatterOptions::new().with_trim(true).with_unwrap(true),
+                )?
+                .format_alloc(None)?;
+                ensure!(
+                    bytes.len() <= 128 * 1024,
+                    "terminal snapshot exceeds 128 KiB"
+                );
+                return Ok(json!(String::from_utf8_lossy(&bytes)));
+            }
+            Operation::WriteTerminal { pane, text } => {
+                self.panes
+                    .get_mut(&pane)
+                    .ok_or_else(|| anyhow::anyhow!("unknown pane {pane}"))?
+                    .send(text.into_bytes())?;
+            }
+            Operation::RegisterCommand { command } => {
+                ensure!(plugins::valid_id(&command.id), "invalid command id");
+                ensure!(
+                    !command.title.trim().is_empty() && command.title.len() <= 200,
+                    "invalid command title"
+                );
+                let commands = &mut self.plugins.runtimes[index].commands;
+                ensure!(
+                    commands.contains_key(&command.id) || commands.len() < 64,
+                    "command limit reached"
+                );
+                commands.insert(command.id.clone(), command);
+            }
+            Operation::UnregisterCommand { command } => {
+                self.plugins.runtimes[index].commands.remove(&command);
+            }
+            Operation::SetPanel { panel } => {
+                panel.validate()?;
+                let panels = &mut self.plugins.runtimes[index].panels;
+                ensure!(
+                    panels.contains_key(&panel.id) || panels.len() < 8,
+                    "panel limit reached"
+                );
+                panels.insert(panel.id.clone(), panel);
+            }
+            Operation::RemovePanel { panel } => {
+                self.plugins.runtimes[index].panels.remove(&panel);
+            }
+            Operation::ReportError { message } => {
+                self.error = Some(format!(
+                    "Plugin {}: {message}",
+                    self.plugins.runtimes[index].id
+                ));
+            }
+        }
+        Ok(serde_json::Value::Null)
+    }
+
+    fn poll_plugins(&mut self, ctx: &egui::Context) {
+        use serde_json::json;
+        if self.plugins.runtimes.is_empty() {
+            return;
+        }
+        for index in 0..self.plugins.runtimes.len() {
+            // Bound work per frame even when a plugin continuously sends requests.
+            for count in 0..32 {
+                let Some(request) = self.plugins.runtimes[index].poll() else {
+                    break;
+                };
+                let response = match request {
+                    Ok(request) => {
+                        let response = match self.plugin_request(index, request.operation, ctx) {
+                            Ok(result) => json!({"result": result}),
+                            Err(error) => json!({"error": error.to_string()}),
+                        };
+                        request
+                            .reply
+                            .try_send(response)
+                            .map_err(|e| anyhow::anyhow!(e.to_string()))
+                    }
+                    Err(error) => Err(anyhow::anyhow!(error)),
+                };
+                if let Err(e) = response {
+                    let plugin = &mut self.plugins.runtimes[index];
+                    self.error = Some(format!("Plugin {}: {e}", plugin.id));
+                    plugin.stop();
+                    break;
+                }
+                if count == 31 {
+                    ctx.request_repaint();
+                }
+            }
+        }
+        let state = self.plugin_state();
+        let serialized = serde_json::to_value(&state).unwrap();
+        for plugin in &mut self.plugins.runtimes {
+            if plugin.is_running() && plugin.last_state.as_ref() != Some(&serialized) {
+                if let Err(e) = plugin.send(Event::State {
+                    state: state.clone(),
+                }) {
+                    self.error = Some(format!("Plugin {}: {e}", plugin.id));
+                    plugin.stop();
+                } else {
+                    plugin.last_state = Some(serialized.clone());
+                }
+            }
+        }
+    }
+
     fn keyboard(&mut self, ctx: &egui::Context) -> Result<()> {
         let events = ctx.input(|i| i.events.clone());
         let modifiers = ctx.input(|i| i.modifiers);
@@ -388,15 +566,24 @@ impl eframe::App for App {
         for pane in self.panes.values_mut() {
             pane.drain(ctx);
         }
-        grab_keys(ctx);
-        if let Err(e) = self.keyboard(ctx) {
-            self.error = Some(e.to_string());
+        self.poll_plugins(ctx);
+        if self.tabs.is_empty() {
+            return;
+        }
+        // Native plugin text fields must receive typing without forwarding it to the PTY.
+        let editing_ui = ctx.memory(|m| m.focused().is_some_and(|id| id != egui::Id::new("keys")));
+        if !editing_ui {
+            grab_keys(ctx);
+            if let Err(e) = self.keyboard(ctx) {
+                self.error = Some(e.to_string());
+            }
         }
         if self.tabs.is_empty() {
             return;
         }
         let mut action = None;
         let mut picked = None;
+        let mut plugin_command = None;
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if cfg!(target_os = "macos") {
@@ -440,6 +627,20 @@ impl eframe::App for App {
                         }
                     }
                 });
+                if self.plugins.runtimes.iter().any(|p| !p.commands.is_empty()) {
+                    ui.menu_button("Plugins", |ui| {
+                        for (index, plugin) in self.plugins.runtimes.iter().enumerate() {
+                            ui.menu_button(&plugin.id, |ui| {
+                                for command in plugin.commands.values() {
+                                    if ui.button(&command.title).clicked() {
+                                        plugin_command = Some((index, command.id.clone()));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
                 ui.menu_button("Settings", |ui| {
                     if ui.button("Reload config").clicked() {
                         action = Some(Action::ReloadConfig);
@@ -538,9 +739,18 @@ impl eframe::App for App {
             }
         }
         let active = tab.active;
+        let active_visible = tab.is_visible(active);
+        for error in self.plugins.show_panels(ctx) {
+            self.error = Some(error);
+        }
+        if let Some((index, command)) = plugin_command
+            && let Err(e) = self.plugins.invoke(index, &command)
+        {
+            self.error = Some(e.to_string());
+        }
         for (id, pane) in &mut self.panes {
-            if let Err(e) =
-                pane.focus(*id == active && tab.is_visible(*id) && ctx.input(|i| i.focused))
+            if let Err(e) = pane
+                .focus(*id == active && active_visible && !editing_ui && ctx.input(|i| i.focused))
             {
                 pane.error = Some(e.to_string());
             }
@@ -728,6 +938,117 @@ fn pane_title(id: PaneId, pane: &Pane) -> String {
 mod tests {
     use super::*;
 
+    fn pump_plugins(app: &mut App, ctx: &egui::Context, done: impl Fn(&App) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            for pane in app.panes.values_mut() {
+                pane.drain(ctx);
+            }
+            app.poll_plugins(ctx);
+            assert!(app.error.is_none(), "plugin error: {:?}", app.error);
+            if done(app) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "plugin timed out");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn embedded_plugin_controls_panes_and_native_ui() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        let path = std::env::temp_dir().join(format!("slerm-plugin-{}.js", std::process::id()));
+        std::fs::write(&path, r#"
+            __slerm.activate({
+                async activate(api) {
+                    let rejected = false;
+                    try { await api.focusPane({pane:999}); } catch (_) { rejected = true; }
+                    if (!rejected) throw Error('missing validation');
+                    await api.execute({action:'new_floating'});
+                    const state = await api.getState();
+                    if (state.tabs[0].panes.length !== 2) throw Error('wrong state');
+                    await api.writeTerminal({pane:state.tabs[0].activePane, text:'echo SDK_INPUT\r'});
+                    if (typeof await api.readTerminal({pane:1}) !== 'string') throw Error('wrong terminal result');
+                    await api.setPanel({panel:{id:'test', title:'Tools', elements:[
+                        {type:'button', id:'done', label:'Done'},
+                        {type:'input', id:'name', label:'Name', value:'Slerm'}
+                    ]}});
+                    await api.registerCommand({command:{id:'ready',title:'Ready'}});
+                },
+                async onEvent(event, api) {
+                    if (event.event === 'command') await api.execute({action:'new_tab'});
+                    if (event.event === 'ui') {
+                        await api.removePanel({panel:event.data.panel});
+                        await api.registerCommand({command:{id:'passed',title:'Passed'}});
+                    }
+                }
+            }, 1);
+        "#).unwrap();
+        let (host, errors) = Host::start(
+            &[config::Plugin {
+                id: "test".into(),
+                path: path.clone(),
+            }],
+            std::path::Path::new("."),
+            &ctx,
+        );
+        std::fs::remove_file(path).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        app.plugins = host;
+        pump_plugins(&mut app, &ctx, |app| {
+            app.plugins.runtimes[0].commands.contains_key("ready")
+        });
+        assert_eq!(app.tabs[0].floats.len(), 1);
+        assert_eq!(app.plugins.runtimes[0].panels.len(), 1);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            assert!(app.plugins.show_panels(ctx).is_empty());
+        });
+        app.plugins.invoke(0, "ready").unwrap();
+        pump_plugins(&mut app, &ctx, |app| app.tabs.len() == 2);
+        app.plugins.runtimes[0]
+            .send(Event::Ui {
+                data: crate::plugin_api::UIEvent::Click {
+                    panel: "test".into(),
+                    control: "done".into(),
+                },
+            })
+            .unwrap();
+        pump_plugins(&mut app, &ctx, |app| {
+            app.plugins.runtimes[0].commands.contains_key("passed")
+        });
+        assert!(app.plugins.runtimes[0].panels.is_empty());
+    }
+
+    #[test]
+    #[ignore = "build the example first: npm run example --prefix sdk"]
+    fn bundled_typescript_example_runs_in_boa() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        let (host, errors) = Host::start(
+            &[config::Plugin {
+                id: "workspace".into(),
+                path: "sdk/dist/workspace.js".into(),
+            }],
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &ctx,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        app.plugins = host;
+        pump_plugins(&mut app, &ctx, |app| {
+            app.plugins.runtimes[0].panels.contains_key("workspace")
+        });
+        app.plugins.runtimes[0]
+            .send(Event::Ui {
+                data: crate::plugin_api::UIEvent::Click {
+                    panel: "workspace".into(),
+                    control: "scratch".into(),
+                },
+            })
+            .unwrap();
+        pump_plugins(&mut app, &ctx, |app| app.tabs[0].floats.len() == 1);
+    }
+
     fn test_app(ctx: &egui::Context) -> App {
         let config = Config {
             shell: vec!["/bin/sh".into()],
@@ -745,6 +1066,7 @@ mod tests {
             next_id: 2,
             error: None,
             suppressed: HashSet::new(),
+            plugins: Host::default(),
         }
     }
 

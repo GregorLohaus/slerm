@@ -4,6 +4,8 @@ mod fonts;
 mod input;
 mod layout;
 mod pane;
+mod plugin_api;
+mod plugins;
 mod pty;
 mod render;
 #[cfg(test)]
@@ -29,13 +31,20 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            "--generate-plugin-sdk" => {
+                let target =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk/src/generated.ts");
+                std::fs::write(&target, plugin_api::typescript())?;
+                println!("Generated {}", target.display());
+                return Ok(());
+            }
             "--version" => {
                 println!("slerm {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--help" | "-h" => {
                 println!(
-                    "slerm [--config PATH] [--check-config | --init-config | --list-themes]\n\nDefault config: {}",
+                    "slerm [--config PATH] [--check-config | --init-config | --list-themes | --generate-plugin-sdk]\n\nDefault config: {}",
                     path.display()
                 );
                 return Ok(());

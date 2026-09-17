@@ -1,0 +1,29 @@
+{
+  "name": "@slerm/plugin-sdk",
+  "version": "0.1.0",
+  "description": "Generated TypeScript API for Slerm's embedded Boa plugins",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "generate": "cargo run --manifest-path ../Cargo.toml -- --generate-plugin-sdk",
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run build && tsc -p tsconfig.examples.json",
+    "example": "npm run check && esbuild examples/workspace.ts --bundle --format=iife --platform=neutral --target=es2022 --outfile=dist/workspace.js",
+    "test": "npm run example && node --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.0",
+    "typescript": "^6.0.3"
+  }
+}

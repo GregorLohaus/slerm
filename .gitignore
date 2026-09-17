@@ -1,3 +1,5 @@
 /target/
 /.tools/
 /.worktrees
+/sdk/node_modules/
+/sdk/dist/

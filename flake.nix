@@ -177,6 +177,9 @@
                   ./Cargo.lock
                   ./config.example.toml
                   ./src
+                  # Embedded runtime and the bindings checked by Rust tests.
+                  ./sdk/runtime.js
+                  ./sdk/src/generated.ts
                 ];
               };
               cargoLock.lockFile = ./Cargo.lock;
