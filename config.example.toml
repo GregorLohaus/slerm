@@ -53,6 +53,8 @@ allow_shared_memory = true
 
 [multiplexer]
 max_panes = 32
+# Floating panes follow the centered cascade and configured size until manually
+# moved or resized. Automatic panes also follow window and configuration changes.
 floating_width = 0.65
 floating_height = 0.65
 # Fractions of the workspace, capped at these many points on large displays.

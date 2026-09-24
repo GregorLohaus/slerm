@@ -727,11 +727,12 @@ impl eframe::App for App {
                         tab.active = id;
                     }
                 });
-                if let Some(result) = result
-                    && result.response.contains_pointer()
-                    && ctx.input(|i| i.pointer.any_pressed())
-                {
-                    tab.active = id;
+                if let Some(result) = result {
+                    remember_float_interaction(ctx, window_id, &result.response);
+                    if result.response.contains_pointer() && ctx.input(|i| i.pointer.any_pressed())
+                    {
+                        tab.active = id;
+                    }
                 }
                 if active {
                     ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, window_id));
@@ -885,7 +886,9 @@ fn float_placement(
     // The fractions are of the workspace, so on a large display they hand a scratch
     // terminal far more room than it needs; the maximums keep it in hand.
     let size = (workspace.size() * vec2(config.floating_width, config.floating_height))
-        .min(vec2(config.floating_max_width, config.floating_max_height));
+        .min(vec2(config.floating_max_width, config.floating_max_height))
+        .max(vec2(160.0, 100.0))
+        .min(workspace.size());
     (workspace.center() - size / 2.0 + float_offset(index), size)
 }
 
@@ -895,8 +898,43 @@ fn float_offset(index: usize) -> egui::Vec2 {
     vec2(step + stack, step)
 }
 
-/// Reapply the cascade when a pane changes slots or the workspace resizes.
-/// Otherwise leave egui's remembered position alone so panes can still be dragged.
+#[derive(Clone, Copy, Default)]
+struct FloatPlacement {
+    configured_size: Option<egui::Vec2>,
+    manual: bool,
+}
+
+/// Opt out of automatic placement independently of the input that moved the pane.
+/// Future movement commands should call this before changing its geometry.
+fn mark_float_manual(ctx: &egui::Context, window_id: egui::Id) {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<FloatPlacement>(window_id.with("placement"))
+            .manual = true;
+    });
+}
+
+fn remember_float_interaction(ctx: &egui::Context, window_id: egui::Id, response: &egui::Response) {
+    let placement = ctx.data_mut(|data| {
+        data.get_temp::<FloatPlacement>(window_id.with("placement"))
+            .unwrap_or_default()
+    });
+    // Edge resizing has its own response, so the area's dragged flag only covers
+    // movement. Compare sizes during a drag to also preserve a manual resize.
+    let resized = placement.configured_size.is_some_and(|size| {
+        (response.rect.size() - size).abs().max_elem() > 1.0
+            && ctx.input(|i| i.pointer.any_down() && i.pointer.is_decidedly_dragging())
+    });
+    // egui can report a drag as soon as the pointer is pressed, before it moves.
+    let moved = response.dragged()
+        && response
+            .total_drag_delta()
+            .is_some_and(|delta| delta != egui::Vec2::ZERO);
+    if moved || resized {
+        mark_float_manual(ctx, window_id);
+    }
+}
+
+/// Follow configured geometry until the pane is explicitly moved or resized.
 fn position_float<'a>(
     ctx: &egui::Context,
     window: egui::Window<'a>,
@@ -906,23 +944,25 @@ fn position_float<'a>(
     config: &config::Multiplexer,
 ) -> egui::Window<'a> {
     let (pos, size) = float_placement(workspace, index, config);
-    let window = window.default_pos(pos).default_size(size);
-    let changed = ctx.data_mut(|data| {
-        let key = window_id.with("cascade placement");
-        let placement = (index, workspace);
-        let previous = data.get_temp::<(usize, Rect)>(key);
-        data.insert_temp(key, placement);
-        previous.is_some_and(|previous| previous != placement)
+    let mut window = window
+        .default_pos(pos)
+        .default_size(size)
+        .min_size(vec2(160.0, 100.0).min(workspace.size()));
+    let (manual, size_changed) = ctx.data_mut(|data| {
+        let placement = data.get_temp_mut_or_default::<FloatPlacement>(window_id.with("placement"));
+        let size_changed = placement.configured_size != Some(size);
+        placement.configured_size = Some(size);
+        (placement.manual, size_changed)
     });
-    if changed {
-        // Center using the remembered size, including user resizing.
-        let size = egui::AreaState::load(ctx, window_id)
-            .and_then(|state| state.size)
-            .unwrap_or(size);
-        window.current_pos(workspace.center() - size / 2.0 + float_offset(index))
-    } else {
-        window
+    if !manual {
+        window = window.current_pos(pos);
+        if size_changed {
+            // default_size alone does not update egui's remembered size. Clamp
+            // for this frame, then restore normal resize limits on the next one.
+            window = window.fixed_size(size).resizable(true);
+        }
     }
+    window
 }
 
 fn pane_title(id: PaneId, pane: &Pane) -> String {
@@ -1136,6 +1176,7 @@ mod tests {
                                 .title_bar(false)
                                 .frame(egui::Frame::NONE);
                             if moved == Some(id) {
+                                mark_float_manual(ctx, window_id);
                                 window = window.current_pos(egui::pos2(100.0, 100.0));
                             }
                             let response =
@@ -1147,6 +1188,7 @@ mod tests {
                                         );
                                     })
                                     .unwrap();
+                            remember_float_interaction(ctx, window_id, &response.response);
                             positions.insert(id, response.response.rect.min);
                         }
                     },
@@ -1155,12 +1197,18 @@ mod tests {
             positions
         };
         render(&tab, Some(2), workspace);
+        render(&tab, Some(5), workspace);
         assert_eq!(render(&tab, None, workspace)[&2], egui::pos2(100.0, 100.0));
-        // Resizing recenters even a dragged pane, using its existing size.
+        // Workspace changes preserve manual panes while recentering the rest.
         let resized = Rect::from_min_size(egui::Pos2::ZERO, vec2(1800.0, 1400.0));
         let positions = render(&tab, None, resized);
         for (index, &id) in tab.floats.iter().enumerate() {
-            assert_eq!(positions[&id], float_placement(resized, index, &config).0);
+            let expected = if id == 2 || id == 5 {
+                egui::pos2(100.0, 100.0)
+            } else {
+                float_placement(resized, index, &config).0
+            };
+            assert_eq!(positions[&id], expected);
         }
         render(&tab, None, workspace);
         render(&tab, Some(2), workspace);
@@ -1173,7 +1221,7 @@ mod tests {
             let positions = render(&tab, None, workspace);
             tab.active = tab.floats[0];
             for index in 0..tab.floats.len() {
-                let expected = if tab.active == 2 {
+                let expected = if tab.active == 2 || tab.active == 5 {
                     egui::pos2(100.0, 100.0)
                 } else {
                     float_placement(workspace, index, &config).0
@@ -1182,6 +1230,160 @@ mod tests {
                 tab.cycle(false);
             }
             assert_eq!(tab.active, tab.floats[0]);
+        }
+    }
+
+    fn render_float(
+        ctx: &egui::Context,
+        workspace: Rect,
+        config: &config::Multiplexer,
+        events: Vec<egui::Event>,
+    ) -> Rect {
+        let window_id = egui::Id::new("test float");
+        let mut rect = Rect::NOTHING;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(workspace),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                let window = egui::Window::new("float")
+                    .id(window_id)
+                    .title_bar(false)
+                    .constrain_to(workspace)
+                    .min_size(vec2(160.0, 100.0))
+                    .frame(egui::Frame::NONE);
+                let response = position_float(ctx, window, window_id, 0, workspace, config)
+                    .show(ctx, |ui| {
+                        let rect = ui.available_rect_before_wrap();
+                        ui.allocate_rect(rect, egui::Sense::hover());
+                        let header = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
+                        ui.interact(header, ui.id().with("header"), egui::Sense::click());
+                        let content = Rect::from_min_max(header.left_bottom(), rect.max);
+                        ui.interact(
+                            content,
+                            ui.id().with("content"),
+                            egui::Sense::click_and_drag(),
+                        );
+                    })
+                    .unwrap();
+                remember_float_interaction(ctx, window_id, &response.response);
+                rect = response.response.rect;
+            },
+        );
+        rect
+    }
+
+    #[test]
+    fn automatic_floats_follow_workspace_and_config_changes() {
+        let ctx = egui::Context::default();
+        let mut config = config::Multiplexer::default();
+        for (width, height, fraction, maximum) in [
+            (1000.0, 800.0, 0.65, 960.0),
+            (800.0, 600.0, 0.65, 960.0),
+            (1800.0, 1400.0, 0.65, 960.0),
+            (1800.0, 1400.0, 0.4, 960.0),
+            (1800.0, 1400.0, 0.4, 500.0),
+            (200.0, 150.0, 0.4, 500.0),
+            (100.0, 80.0, 0.4, 500.0),
+            (1000.0, 800.0, 0.65, 960.0),
+        ] {
+            config.floating_width = fraction;
+            config.floating_height = fraction;
+            config.floating_max_width = maximum;
+            config.floating_max_height = maximum;
+            let workspace = Rect::from_min_size(egui::pos2(0.0, 30.0), vec2(width, height));
+            let (pos, size) = float_placement(workspace, 0, &config);
+            for _ in 0..3 {
+                render_float(&ctx, workspace, &config, vec![]);
+            }
+            let rect = render_float(&ctx, workspace, &config, vec![]);
+            assert!((rect.min - pos).abs().max_elem() < 0.1, "{rect:?}");
+            assert!((rect.size() - size).abs().max_elem() < 0.1, "{rect:?}");
+        }
+    }
+
+    #[test]
+    fn manual_float_geometry_survives_workspace_config_and_visibility_changes() {
+        for gesture in ["move", "resize", "select", "click"] {
+            let ctx = egui::Context::default();
+            let window_id = egui::Id::new("test float");
+            let mut config = config::Multiplexer::default();
+            let workspace = Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 800.0));
+            for _ in 0..3 {
+                render_float(&ctx, workspace, &config, vec![]);
+            }
+            let before = render_float(&ctx, workspace, &config, vec![]);
+            let start = match gesture {
+                "resize" => before.right_bottom() + vec2(2.0, 2.0),
+                "select" => before.center(),
+                _ => before.center_top() + vec2(0.0, 12.0),
+            };
+            let end = if gesture == "click" {
+                start
+            } else {
+                start + vec2(50.0, 40.0)
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            render_float(
+                &ctx,
+                workspace,
+                &config,
+                vec![egui::Event::PointerMoved(start)],
+            );
+            render_float(&ctx, workspace, &config, vec![button(start, true)]);
+            if gesture != "click" {
+                render_float(
+                    &ctx,
+                    workspace,
+                    &config,
+                    vec![egui::Event::PointerMoved(end)],
+                );
+            }
+            render_float(&ctx, workspace, &config, vec![button(end, false)]);
+            let after = render_float(&ctx, workspace, &config, vec![]);
+            let manual = matches!(gesture, "move" | "resize");
+            assert_eq!(
+                ctx.data_mut(|data| data
+                    .get_temp::<FloatPlacement>(window_id.with("placement"))
+                    .unwrap()
+                    .manual),
+                manual,
+                "{gesture}"
+            );
+            match gesture {
+                "move" => {
+                    assert_eq!(after.min, before.min + vec2(50.0, 40.0));
+                    assert_eq!(after.size(), before.size());
+                }
+                "resize" => assert_ne!(after.size(), before.size()),
+                _ => assert_eq!(after, before),
+            }
+            // Hidden and zoomed floats both skip rendering their window.
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+            config.floating_width = 0.4;
+            config.floating_height = 0.4;
+            let workspace = Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 1000.0));
+            for _ in 0..3 {
+                render_float(&ctx, workspace, &config, vec![]);
+            }
+            let restored = render_float(&ctx, workspace, &config, vec![]);
+            let (pos, size) = float_placement(workspace, 0, &config);
+            assert_eq!(
+                restored,
+                if manual {
+                    after
+                } else {
+                    Rect::from_min_size(pos, size)
+                },
+                "{gesture}"
+            );
         }
     }
 
