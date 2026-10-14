@@ -29,6 +29,39 @@ fn key(key: Key, modifiers: Modifiers) -> Event {
 }
 
 #[test]
+fn file_drops_quote_paths_without_changing_unicode_or_submitting() {
+    let paths = [
+        "/tmp/a b",
+        "/tmp/it's a file",
+        "/tmp/✓-界-\u{f00c}",
+        "/tmp/$(echo nope);`pwd`",
+        "/tmp/back\\slash",
+    ];
+    let files: Vec<_> = paths
+        .iter()
+        .map(|path| egui::DroppedFile {
+            path: Some(path.into()),
+            ..Default::default()
+        })
+        .collect();
+    let text = input::dropped_file_paths(&files).unwrap().unwrap();
+    assert_eq!(shell_words::split(&text).unwrap(), paths);
+    assert!(text.ends_with(' '));
+    assert!(!text.contains(['\r', '\n']));
+    assert!(input::dropped_file_paths(&[]).unwrap().is_none());
+    assert!(input::dropped_file_paths(&[egui::DroppedFile::default()]).is_err());
+    for path in ["/tmp/new\nline", "/tmp/escape\x1b", "/tmp/return\r"] {
+        assert!(
+            input::dropped_file_paths(&[egui::DroppedFile {
+                path: Some(path.into()),
+                ..Default::default()
+            }])
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn cursor_defaults_to_hollow_and_respects_application_styles() {
     use libghostty_vt::{RenderState, render::CursorVisualStyle};
 

@@ -858,12 +858,33 @@ fn show_pane(
         Ok(clicked) => focused |= clicked,
         Err(e) => pane.error = Some(e.to_string()),
     }
+    // Layer-aware hit testing prevents a tile behind a floating pane from
+    // consuming the drop. Some backends omit the pointer during native drags;
+    // in that case the active, visible pane receives it.
+    let drop_target =
+        ui.rect_contains_pointer(rect) || (active && ui.input(|i| i.pointer.hover_pos().is_none()));
+    let hovering_files = drop_target && ui.input(|i| !i.raw.hovered_files.is_empty());
+    if drop_target {
+        let files = ui.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
+        match input::dropped_file_paths(&files) {
+            Ok(Some(text)) => match pane.paste(&text) {
+                Ok(()) => focused = true,
+                Err(e) => pane.error = Some(e.to_string()),
+            },
+            Ok(None) => {}
+            Err(e) => pane.error = Some(e.to_string()),
+        }
+    }
     ui.painter().rect_stroke(
         rect,
         CORNER,
         Stroke::new(
-            theme::BORDER_WIDTH,
-            if active {
+            if hovering_files {
+                2.0
+            } else {
+                theme::BORDER_WIDTH
+            },
+            if active || hovering_files {
                 accent
             } else {
                 theme::color(theme.border)
@@ -1108,6 +1129,196 @@ mod tests {
             suppressed: HashSet::new(),
             plugins: Host::default(),
         }
+    }
+
+    #[test]
+    fn clipboard_preserves_unicode_graphemes_and_soft_wraps() {
+        use libghostty_vt::{
+            selection::Selection,
+            terminal::{Point, PointCoordinate},
+        };
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        for (cols, text, last_row) in [
+            (
+                80,
+                "✓ ✔ ☑ \u{f00c} \u{f42e} \u{f012c} café e\u{301} 界 👩\u{200d}💻",
+                0,
+            ),
+            (10, "one ✓ two 界 three", 1),
+            (80, "first ✓\r\nsecond 界", 1),
+        ] {
+            let pane = app.panes.get_mut(&1).unwrap();
+            assert!(pane.copy().unwrap().is_none());
+            pane.terminal.resize(cols, 4, 8, 16).unwrap();
+            pane.terminal.vt_write(b"\x1b[2J\x1b[H");
+            // Split inside UTF-8 characters just as PTY reads can do.
+            for bytes in text.as_bytes().chunks(2) {
+                pane.terminal.vt_write(bytes);
+            }
+            let a = pane
+                .terminal
+                .grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 }))
+                .unwrap();
+            let b = pane
+                .terminal
+                .grid_ref(Point::Viewport(PointCoordinate {
+                    x: cols - 1,
+                    y: last_row,
+                }))
+                .unwrap();
+            pane.terminal
+                .set_selection(Some(&Selection::new(a, b, false)))
+                .unwrap();
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                app.action(Action::Copy, ctx).unwrap()
+            });
+            let copies: Vec<_> = output
+                .platform_output
+                .commands
+                .into_iter()
+                .filter_map(|command| {
+                    if let egui::OutputCommand::CopyText(text) = command {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(copies, vec![text.replace("\r\n", "\n")]);
+            app.panes
+                .get_mut(&1)
+                .unwrap()
+                .terminal
+                .set_selection(None)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn selection_starts_at_mouse_down_before_drag_threshold() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        app.panes.get_mut(&1).unwrap().terminal.vt_write(b"abcdef");
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(400.0, 200.0));
+        let mut cell = vec2(8.0, 16.0);
+        let mut run = |events| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(rect),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        cell = crate::render::cell_size(
+                            ui.painter(),
+                            &egui::FontId::monospace(app.config.font_size),
+                        );
+                        app.panes
+                            .get_mut(&1)
+                            .unwrap()
+                            .show(ui, rect, &app.config, &app.theme, true)
+                            .unwrap();
+                    });
+                },
+            );
+            cell
+        };
+        let cell = run(vec![]);
+        let start = rect.min + vec2(6.0 + cell.x * 0.5, 6.0 + cell.y * 0.5);
+        let end = start + vec2(cell.x * 3.0, 0.0);
+        run(vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        run(vec![egui::Event::PointerMoved(end)]);
+        run(vec![egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(app.panes[&1].copy().unwrap().as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn file_drops_target_the_visible_pane_once() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        let second = Pane::new(&app.config, &app.theme, &ctx, None).unwrap();
+        app.panes.insert(2, second);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0, 400.0));
+        let mut float = Rect::NOTHING;
+        let mut run = |events, dropped_files| {
+            let mut focused = Vec::new();
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    dropped_files,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        if show_pane(
+                            ui,
+                            1,
+                            app.panes.get_mut(&1).unwrap(),
+                            screen,
+                            &app.config,
+                            &app.theme,
+                            true,
+                        ) {
+                            focused.push(1);
+                        }
+                    });
+                    egui::Area::new(egui::Id::new("drop test float"))
+                        .fixed_pos(egui::pos2(100.0, 80.0))
+                        .order(egui::Order::Foreground)
+                        .show(ctx, |ui| {
+                            float = ui.allocate_space(vec2(250.0, 200.0)).1;
+                            if show_pane(
+                                ui,
+                                2,
+                                app.panes.get_mut(&2).unwrap(),
+                                float,
+                                &app.config,
+                                &app.theme,
+                                false,
+                            ) {
+                                focused.push(2);
+                            }
+                        });
+                },
+            );
+            (focused, float)
+        };
+        for _ in 0..3 {
+            run(vec![], vec![]);
+        }
+        let (_, float) = run(vec![], vec![]);
+        for (pointer, expected) in [
+            (egui::Event::PointerMoved(float.center()), 2),
+            (egui::Event::PointerMoved(egui::pos2(20.0, 50.0)), 1),
+            (egui::Event::PointerGone, 1),
+        ] {
+            let (focused, _) = run(
+                vec![pointer],
+                vec![egui::DroppedFile {
+                    path: Some("/tmp/a ✓ file".into()),
+                    ..Default::default()
+                }],
+            );
+            assert_eq!(focused, vec![expected]);
+            assert!(run(vec![], vec![]).0.is_empty(), "drop must not repeat");
+        }
+        assert!(app.panes.values().all(|pane| pane.error.is_none()));
     }
 
     #[test]

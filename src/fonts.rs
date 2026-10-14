@@ -115,6 +115,24 @@ fn load_from_database(config: &Config, mut db: Database) -> Result<FontDefinitio
     let mut fonts = FontDefinitions::default();
     let builtin = fonts.families[&FontFamily::Monospace].clone();
     let mut loaded = HashMap::new();
+    // Nerd Fonts cover private-use icons, but can omit ordinary Unicode
+    // symbols (including ✓ and ✔). Keep system symbol faces after the user's
+    // fonts, and never let them establish the terminal's line metrics.
+    let mut symbols = Vec::new();
+    for name in [
+        "Apple Symbols",
+        "Noto Sans Symbols 2",
+        "Noto Sans Symbols",
+        "Segoe UI Symbol",
+        "DejaVu Sans",
+        "Arial Unicode MS",
+    ] {
+        if let Some(id) = query(&db, name, false, false)
+            && let Ok(name) = register(&db, &mut fonts, &mut loaded, id)
+        {
+            symbols.push(name);
+        }
+    }
     for (bold, italic, path) in [
         (false, false, None),
         (true, false, config.font_bold_path.as_deref()),
@@ -157,6 +175,11 @@ fn load_from_database(config: &Config, mut db: Database) -> Result<FontDefinitio
                 if !chain.contains(&name) {
                     chain.push(name);
                 }
+            }
+        }
+        for name in &symbols {
+            if !chain.contains(name) {
+                chain.push(name.clone());
             }
         }
         chain.extend(builtin.iter().cloned());
@@ -245,8 +268,29 @@ mod tests {
             assert!(faces.insert(name.clone()));
             let data = &fonts.font_data[name];
             let face = ab_glyph::FontRef::try_from_slice_and_index(&data.font, data.index).unwrap();
-            for c in ['M', '\u{f121}', '\u{e0a0}', '\u{f0001}'] {
+            for c in [
+                'M',
+                '\u{f00c}',
+                '\u{f42e}',
+                '\u{f012c}',
+                '\u{f121}',
+                '\u{e0a0}',
+                '\u{f0001}',
+            ] {
                 assert_ne!(face.glyph_id(c).0, 0, "missing {c:?} in {name}");
+            }
+            for c in ['✓', '✔', '☑'] {
+                assert!(
+                    fonts.families[&family(bold, italic)].iter().any(|name| {
+                        let data = &fonts.font_data[name];
+                        ab_glyph::FontRef::try_from_slice_and_index(&data.font, data.index)
+                            .unwrap()
+                            .glyph_id(c)
+                            .0
+                            != 0
+                    }),
+                    "missing fallback for {c:?}"
+                );
             }
         }
         let mut db = Database::new();

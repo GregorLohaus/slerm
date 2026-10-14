@@ -493,10 +493,10 @@ impl Pane {
     }
 
     pub fn copy(&self) -> Result<Option<String>> {
-        Ok(self
-            .terminal
+        self.terminal
             .format_selection_alloc(None, FormatOptions::new().with_trim(true).with_unwrap(true))?
-            .map(|b| String::from_utf8_lossy(&b).into_owned()))
+            .map(|b| String::from_utf8(b.to_vec()).context("Selection is not valid UTF-8"))
+            .transpose()
     }
 
     /// Where a pane spawned from this one should start: the directory the shell
@@ -695,7 +695,16 @@ impl Pane {
                     .clamp(0.0, (self.size.1 - 1) as f32) as u32,
             };
             if response.drag_started() {
-                self.selection_start = Some(point);
+                let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
+                let origin = origin - grid.min;
+                self.selection_start = Some(PointCoordinate {
+                    x: (origin.x / cell.x)
+                        .floor()
+                        .clamp(0.0, (self.size.0 - 1) as f32) as u16,
+                    y: (origin.y / cell.y)
+                        .floor()
+                        .clamp(0.0, (self.size.1 - 1) as f32) as u32,
+                });
             }
             if response.clicked() {
                 self.terminal.set_selection(None)?;

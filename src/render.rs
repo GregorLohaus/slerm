@@ -183,11 +183,11 @@ fn layout_styled_glyph(
     painter.layout_job(job)
 }
 
-fn nerd_icon(text: &str) -> bool {
+fn terminal_symbol(text: &str) -> bool {
     // Includes the supplementary private-use plane used by Material Design.
     text.chars()
         .next()
-        .is_some_and(|c| matches!(c as u32, 0xe000..=0xf8ff | 0xf0000..=0xffffd))
+        .is_some_and(|c| matches!(c as u32, 0x2600..=0x27bf | 0xe000..=0xf8ff | 0xf0000..=0xffffd))
 }
 
 fn icon_shape(galley: Arc<egui::Galley>, rect: Rect, color: Color32) -> egui::Shape {
@@ -430,7 +430,7 @@ impl Renderer {
                             foregrounds.push(separator);
                         } else if text != " " && !text.starts_with('\u{10eeee}') {
                             let index = usize::from(style.bold) + 2 * usize::from(style.italic);
-                            let icon = nerd_icon(&text);
+                            let icon = terminal_symbol(&text);
                             let key = (text.clone(), style.bold, style.italic);
                             let galley = if let Some(galley) = self.glyphs.get(&key) {
                                 galley.clone()
@@ -766,8 +766,17 @@ mod tests {
             ctx.set_pixels_per_point(scale);
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 let painter = ctx.layer_painter(egui::LayerId::background());
-                for text in ["\u{e0a0}", "\u{f121}", "\u{f0001}"] {
-                    assert!(nerd_icon(text));
+                for text in [
+                    "✓",
+                    "✔",
+                    "☑",
+                    "\u{f00c}",
+                    "\u{f012c}",
+                    "\u{e0a0}",
+                    "\u{f121}",
+                    "\u{f0001}",
+                ] {
+                    assert!(terminal_symbol(text));
                     for width in [4.0, 9.0, 18.0] {
                         let rect = Rect::from_min_size(pos2(23.0, 41.0), vec2(width, 18.0));
                         let galley =
@@ -783,8 +792,8 @@ mod tests {
                 }
             });
         }
-        assert!(!nerd_icon("M"));
-        assert!(!nerd_icon("\u{10eeee}"));
+        assert!(!terminal_symbol("M"));
+        assert!(!terminal_symbol("\u{10eeee}"));
     }
 
     fn frame(

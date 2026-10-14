@@ -1,5 +1,28 @@
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use libghostty_vt::{Terminal, key};
+
+/// Insert local file paths as shell arguments, preserving Unicode and quoting
+/// spaces, quotes, and shell metacharacters. Never submit the command.
+pub fn dropped_file_paths(files: &[egui::DroppedFile]) -> Result<Option<String>> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut text = String::new();
+    for file in files {
+        let path = file
+            .path
+            .as_ref()
+            .context("Dropped file has no local path")?;
+        let path = path.to_str().context("Dropped path is not valid UTF-8")?;
+        ensure!(
+            !path.is_empty() && !path.chars().any(char::is_control),
+            "Dropped path contains an empty name or control characters"
+        );
+        text.push_str(&shell_words::quote(path));
+        text.push(' ');
+    }
+    Ok(Some(text))
+}
 
 /// Avoid libghostty-vt 0.2.1's encode_to_vec capacity calculation, which can
 /// reserve too little when the destination already has some spare capacity.
