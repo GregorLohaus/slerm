@@ -4,9 +4,9 @@ export const apiVersion = 1 as const;
 
 export type Action = "split_right" | "split_down" | "new_floating" | "new_pane" | "toggle_floating" | "toggle_floats" | "next_pane" | "previous_pane" | "focus_left" | "focus_down" | "focus_up" | "focus_right" | "close_pane" | "zoom_pane" | "new_tab" | "next_tab" | "previous_tab" | "reload_config" | "copy" | "paste" | "open_scrollback";
 
-export type Operation = { "method": "getState", } | { "method": "execute", action: Action, } | { "method": "focusPane", pane: number, } | { "method": "focusTab", tab: number, } | { "method": "readTerminal", pane: number, } | { "method": "writeTerminal", pane: number, text: string, } | { "method": "openTerminal", program: string, args: Array<string>, cwd: string, } | { "method": "registerCommand", command: PluginCommand, } | { "method": "unregisterCommand", command: string, } | { "method": "setPanel", panel: Panel, } | { "method": "removePanel", panel: string, } | { "method": "reportError", message: string, };
+export type Operation = { "method": "getState", "params": Record<symbol, never> } | { "method": "execute", "params": { action: Action, } } | { "method": "focusPane", "params": { pane: number, } } | { "method": "focusTab", "params": { tab: number, } } | { "method": "readTerminal", "params": { pane: number, } } | { "method": "writeTerminal", "params": { pane: number, text: string, } } | { "method": "openTerminal", "params": { program: string, args: Array<string>, cwd: string, } } | { "method": "registerCommand", "params": { command: PluginCommand, } } | { "method": "unregisterCommand", "params": { command: string, } } | { "method": "setPanel", "params": { panel: Panel, } } | { "method": "removePanel", "params": { panel: string, } } | { "method": "focusPanel", "params": { panel: string, control?: string, } } | { "method": "navigate", "params": { panel: string, control: string, to: Navigation, } } | { "method": "reportError", "params": { message: string, } };
 
-export type Results = { getState: State, execute: null, focusPane: null, focusTab: null, readTerminal: string, writeTerminal: null, openTerminal: PaneState, registerCommand: null, unregisterCommand: null, setPanel: null, removePanel: null, reportError: null, };
+export type Results = { getState: State, execute: null, focusPane: null, focusTab: null, readTerminal: string, writeTerminal: null, openTerminal: PaneState, registerCommand: null, unregisterCommand: null, setPanel: null, removePanel: null, focusPanel: null, navigate: null, reportError: null, };
 
 export type State = { activeTab: number | null, tabs: Array<TabState>, };
 
@@ -14,7 +14,7 @@ export type TabState = { id: number, activePane: number, floatsVisible: boolean,
 
 export type PaneState = { id: number, title: string, floating: boolean, exited: boolean, cwd: string | null, };
 
-export type FsOperation = { "method": "readDir", path: string, } | { "method": "stat", path: string, } | { "method": "readFile", path: string, } | { "method": "writeFile", path: string, text: string, } | { "method": "createDir", path: string, } | { "method": "remove", path: string, } | { "method": "rename", from: string, to: string, };
+export type FsOperation = { "method": "readDir", "params": { path: string, } } | { "method": "stat", "params": { path: string, } } | { "method": "readFile", "params": { path: string, } } | { "method": "writeFile", "params": { path: string, text: string, } } | { "method": "createDir", "params": { path: string, } } | { "method": "remove", "params": { path: string, } } | { "method": "rename", "params": { from: string, to: string, } };
 
 export type FsResults = { readDir: Array<DirEntry>, stat: FileStat, readFile: string, writeFile: null, createDir: null, remove: null, rename: null, };
 
@@ -28,11 +28,38 @@ export type FileStat = { kind: FileKind, symlink: boolean, size: number,
  */
 modified: number | null, };
 
+export type SystemOperation = { "method": "run", "params": { program: string, args?: Array<string>, cwd: string, stdin?: string, 
+/**
+ * Milliseconds before the process is killed; defaults to 30 seconds.
+ */
+timeout?: number, } } | { "method": "fetch", "params": { url: string, method?: string, headers?: { [key in string]: string }, body?: string, 
+/**
+ * Milliseconds for the whole request; defaults to 30 seconds.
+ */
+timeout?: number, } } | { "method": "env", "params": { name: string, } };
+
+export type SystemResults = { run: RunOutput, fetch: FetchResponse, env: string | null, };
+
+export type RunOutput = { status: number | null, stdout: string, stderr: string, timedOut: boolean, };
+
+export type FetchResponse = { status: number, 
+/**
+ * Lowercase names; repeated headers are joined with ", ".
+ */
+headers: { [key in string]: string }, body: string, };
+
 export type PluginCommand = { id: string, title: string, };
 
-export type Panel = { id: string, title: string, elements: Array<Element>, placement?: PanelPlacement, };
+export type Panel = { id: string, title: string, elements: Array<Element>, placement?: PanelPlacement, 
+/**
+ * Shortcuts sent as `key` events while a list in this panel has focus,
+ * such as `"J"`, `"Shift+G"`, or `"Ctrl+D"`. Text fields keep their typing.
+ */
+keys?: Array<string>, };
 
 export type PanelPlacement = "floating" | "left" | "right";
+
+export type Navigation = "next" | "previous" | "first" | "last" | "pageDown" | "pageUp" | "left" | "right" | "activate";
 
 export type TreeNode = { id: string, label: string, 
 /**
@@ -40,15 +67,35 @@ export type TreeNode = { id: string, label: string,
  */
 icon?: string, branch?: boolean, children?: Array<TreeNode>, };
 
-export type Element = { "type": "text", text: string, } | { "type": "button", id: string, label: string, } | { "type": "input", id: string, label: string, value: string, } | { "type": "separator" } | { "type": "row", elements: Array<Element>, } | { "type": "tree", id: string, nodes: Array<TreeNode>, };
+export type TextStyle = "heading" | "strong" | "weak" | "small" | "monospace";
 
-export type UIEvent = { "kind": "select", panel: string, control: string, item: string, } | { "kind": "activate", panel: string, control: string, item: string, } | { "kind": "toggle", panel: string, control: string, item: string, expanded: boolean, } | { "kind": "click", panel: string, control: string, } | { "kind": "change", panel: string, control: string, value: string, };
+export type TextColor = "accent" | "warning" | "error";
+
+export type TableRow = { id: string, cells: Array<string>, };
+
+export type Element = { "type": "text", text: string, style?: TextStyle, color?: TextColor, } | { "type": "button", id: string, label: string, } | { "type": "input", id: string, label: string, value: string, } | { "type": "textArea", id: string, value: string, 
+/**
+ * Visible lines; defaults to 6.
+ */
+rows?: number, 
+/**
+ * Monospace text, as in a code editor.
+ */
+code?: boolean, readonly?: boolean, } | { "type": "checkbox", id: string, label: string, checked: boolean, } | { "type": "slider", id: string, label?: string, value: number, min: number, max: number, step?: number, } | { "type": "select", id: string, label?: string, value: string, options: Array<string>, } | { "type": "progress", value: number, text?: string, } | { "type": "spinner" } | { "type": "separator" } | { "type": "row", elements: Array<Element>, } | { "type": "section", id: string, title: string, 
+/**
+ * Whether the section starts open; defaults to true.
+ */
+open?: boolean, elements: Array<Element>, } | { "type": "table", id: string, columns: Array<string>, rows: Array<TableRow>, selected?: string, } | { "type": "tree", id: string, nodes: Array<TreeNode>, };
+
+export type UIEvent = { "kind": "select", panel: string, control: string, item: string, } | { "kind": "activate", panel: string, control: string, item: string, } | { "kind": "toggle", panel: string, control: string, item: string, expanded: boolean, } | { "kind": "click", panel: string, control: string, } | { "kind": "check", panel: string, control: string, checked: boolean, } | { "kind": "number", panel: string, control: string, value: number, } | { "kind": "key", panel: string, control: string, key: string, } | { "kind": "change", panel: string, control: string, value: string, };
 
 export type Event = { "event": "command", command: string, } | { "event": "state", state: State, } | { "event": "ui", data: UIEvent, };
 
-type Params<O, M> = Omit<Extract<O, { method: M }>, "method">;
+type Params<O, M> = Extract<O, { method: M }> extends { params: infer P } ? P : never;
 type Client<O extends { method: string }, R extends Record<O["method"], unknown>> = {
-  [M in O["method"]]: (...args: keyof Params<O, M> extends never ? [] : [params: Params<O, M>]) => Promise<R[M] extends null ? void : R[M]>;
+  // ts-rs renders an empty parameter list as Record<symbol, never>.
+  [M in O["method"]]: (...args: keyof Params<O, M> extends symbol ? [] : [params: Params<O, M>]) => Promise<R[M] extends null ? void : R[M]>;
 };
 export type Slerm = Client<Operation, Results>;
 export type Fs = Client<FsOperation, FsResults>;
+export type System = Client<SystemOperation, SystemResults>;

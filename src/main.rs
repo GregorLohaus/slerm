@@ -8,6 +8,7 @@ mod macos;
 mod pane;
 mod plugin_api;
 mod plugin_fs;
+mod plugin_system;
 mod plugin_ui;
 mod plugins;
 mod pty;

@@ -1,4 +1,4 @@
-import { definePlugin, fs, type DirEntry, type Element, type Slerm, type State, type TreeNode } from "../src/index.js";
+import { definePlugin, fs, type DirEntry, type Element, type Navigation, type Slerm, type State, type TreeNode } from "../src/index.js";
 
 // Use an absolute path if hx is not on the GUI application's PATH.
 const EDITOR = "hx";
@@ -11,13 +11,20 @@ const ICONS: Record<string, string> = {
 };
 // The host accepts at most 16384 tree nodes per panel.
 const MAX_NODES = 16_000;
+// Vim-style keys, sent while the tree has focus. Escape returns to the terminal.
+const MOVES: Record<string, Navigation> = {
+  J: "next", K: "previous", H: "left", L: "right", O: "activate",
+  "Shift+G": "last", "Ctrl+D": "pageDown", "Ctrl+U": "pageUp",
+};
+const KEYS = [...Object.keys(MOVES), "G", "Minus", "R", "Q"];
 
 let root: string | undefined;
 // Listings of the directories loaded so far. The host keeps expansion state, so
 // collapsed folders stay loaded and reopen instantly.
 const listings = new Map<string, DirEntry[]>();
 let follow = true;
-let shown = true;
+let shown = false;
+let lastG = 0;
 let error = "";
 // The active pane and its directory when last followed, so manual navigation
 // sticks until the user switches panes or changes directory.
@@ -75,8 +82,20 @@ async function show(api: Slerm) {
     { type: "text", text: root ?? "No working directory" },
   ];
   if (status) elements.push({ type: "text", text: status });
-  elements.push({ type: "tree", id: "tree", nodes: tree });
-  await api.setPanel({ panel: { id: "files", title: "Files", placement: "left", elements } });
+  elements.push(
+    { type: "text", text: "j/k move · h/l fold · o open · gg/G ends · - up · r refresh · q close", style: "small" },
+    { type: "tree", id: "tree", nodes: tree },
+  );
+  await api.setPanel({ panel: { id: "files", title: "Files", placement: "left", keys: KEYS, elements } });
+}
+
+async function hide(api: Slerm) {
+  shown = false;
+  await api.removePanel({ panel: "files" });
+}
+
+async function up() {
+  if (root && root !== "/") await open(root.slice(0, root.lastIndexOf("/")) || "/");
 }
 
 async function followState(state: State): Promise<boolean> {
@@ -92,30 +111,44 @@ async function followState(state: State): Promise<boolean> {
 
 definePlugin({
   async activate(api) {
-    await api.registerCommand({ command: { id: "show-files", title: "Show file tree" } });
-    try { await followState(await api.getState()); }
-    catch (e) { error = String(e); }
-    await show(api);
+    await api.registerCommand({ command: { id: "toggle-files", title: "Toggle file tree" } });
   },
   async onEvent(event, api) {
     try {
-      if (event.event === "command" && event.command === "show-files") {
+      if (event.event === "command" && event.command === "toggle-files") {
+        if (shown) return await hide(api);
         shown = true;
         followed = "";
         await followState(await api.getState());
+        await show(api);
+        await api.focusPanel({ panel: "files", control: "tree" });
+        return;
       } else if (event.event === "state") {
         if (!await followState(event.state)) return;
       } else if (event.event === "ui" && event.data.panel === "files") {
         const data = event.data;
         if (data.kind === "click") {
-          if (data.control === "close") { shown = false; await api.removePanel({ panel: "files" }); return; }
+          if (data.control === "close") return await hide(api);
           if (data.control === "refresh") await refresh();
-          if (data.control === "up" && root && root !== "/") await open(root.slice(0, root.lastIndexOf("/")) || "/");
+          if (data.control === "up") await up();
           if (data.control === "follow") {
             follow = !follow;
             followed = "";
             await followState(await api.getState());
           }
+        } else if (data.kind === "key") {
+          const move = MOVES[data.key];
+          if (move) return await api.navigate({ panel: "files", control: "tree", to: move });
+          if (data.key === "G") {
+            // gg jumps to the top: two presses within half a second.
+            const now = Date.now();
+            if (now - lastG > 500) { lastG = now; return; }
+            lastG = 0;
+            return await api.navigate({ panel: "files", control: "tree", to: "first" });
+          }
+          if (data.key === "Q") return await hide(api);
+          if (data.key === "R") await refresh();
+          if (data.key === "Minus") await up();
         } else if (data.kind === "toggle") {
           if (!data.expanded || listings.has(data.item)) return;
           await load(data.item);

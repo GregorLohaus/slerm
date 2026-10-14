@@ -15,7 +15,8 @@ use boa_engine::{
 use serde_json::Value;
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
+    cmp::Reverse,
+    collections::{BTreeMap, BinaryHeap, VecDeque},
     path::Path,
     rc::Rc,
     sync::{
@@ -42,10 +43,47 @@ pub struct Pending {
     pub reply: SyncSender<Value>,
 }
 
+/// Concurrent `run` and `fetch` calls per plugin.
+const MAX_RUNNING: usize = 16;
+const MAX_TIMERS: usize = 4096;
+
+/// What the worker thread waits for: UI events, and slow calls that finished.
+pub enum Message {
+    Event(Event),
+    Done { id: u64, reply: Value },
+}
+
 struct Bridge {
     requests: SyncSender<Result<Pending, String>>,
     repaint: egui::Context,
     stopped: Arc<AtomicBool>,
+    inbox: SyncSender<Message>,
+    env: Arc<BTreeMap<String, String>>,
+    next_call: std::cell::Cell<u64>,
+    running: std::cell::Cell<usize>,
+    /// Pending timers by deadline, holding the JavaScript timer handle.
+    timers: RefCell<BinaryHeap<Reverse<(Instant, u64)>>>,
+}
+
+impl Bridge {
+    fn new(
+        requests: SyncSender<Result<Pending, String>>,
+        repaint: egui::Context,
+        stopped: Arc<AtomicBool>,
+        inbox: SyncSender<Message>,
+        env: Arc<BTreeMap<String, String>>,
+    ) -> Self {
+        Self {
+            requests,
+            repaint,
+            stopped,
+            inbox,
+            env,
+            next_call: Default::default(),
+            running: Default::default(),
+            timers: Default::default(),
+        }
+    }
 }
 
 fn request<T: serde::de::DeserializeOwned>(args: &[JsValue], ctx: &mut Context) -> JsResult<T> {
@@ -99,6 +137,67 @@ fn fs_call(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue
     Ok(js_string!(serde_json::to_string(&reply).unwrap()).into())
 }
 
+fn reply(reply: Value) -> JsValue {
+    js_string!(serde_json::to_string(&reply).unwrap()).into()
+}
+
+// Fast calls answer at once; slow ones answer {"pending": id} and finish later
+// through `__slerm_complete`, without blocking this plugin's thread.
+fn system_call(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    use crate::plugin_system::Call;
+    let operation = request(args, ctx)?;
+    let env = ctx.get_data::<Bridge>().unwrap().env.clone();
+    let call = match crate::plugin_system::call(operation, &env) {
+        Ok(call) => call,
+        Err(error) => return Ok(reply(serde_json::json!({"error": format!("{error:#}")}))),
+    };
+    let work = match call {
+        Call::Now(result) => return Ok(reply(serde_json::json!({"result": result}))),
+        Call::Later(work) => work,
+    };
+    let bridge = ctx.get_data::<Bridge>().unwrap();
+    if bridge.running.get() >= MAX_RUNNING {
+        return Ok(reply(serde_json::json!({
+            "error": format!("at most {MAX_RUNNING} calls can run at once")
+        })));
+    }
+    let id = bridge.next_call.get();
+    bridge.next_call.set(id + 1);
+    bridge.running.set(bridge.running.get() + 1);
+    let inbox = bridge.inbox.clone();
+    thread::spawn(move || {
+        let reply = match work() {
+            Ok(result) => serde_json::json!({"result": result}),
+            Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+        };
+        // The plugin may have stopped; then nobody is waiting.
+        let _ = inbox.send(Message::Done { id, reply });
+    });
+    Ok(reply(serde_json::json!({"pending": id})))
+}
+
+/// `__slerm_timer(handle, ms)` schedules `__slerm_fire(handle)`.
+fn timer(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let handle = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_number(ctx)?;
+    let ms = args
+        .get(1)
+        .unwrap_or(&JsValue::undefined())
+        .to_number(ctx)?;
+    let bridge = ctx.get_data::<Bridge>().unwrap();
+    let mut timers = bridge.timers.borrow_mut();
+    if timers.len() >= MAX_TIMERS {
+        return Err(JsNativeError::range()
+            .with_message(format!("at most {MAX_TIMERS} timers can be pending"))
+            .into());
+    }
+    let delay = Duration::from_secs_f64(ms.clamp(0.0, 2_147_483_647.0) / 1000.0);
+    timers.push(Reverse((Instant::now() + delay, handle as u64)));
+    Ok(JsValue::undefined())
+}
+
 fn host_error(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let text = args
         .first()
@@ -150,7 +249,7 @@ impl JobExecutor for Jobs {
     }
 }
 
-fn run(source: String, events: Receiver<Event>, bridge: Bridge) -> Result<()> {
+fn run(source: String, events: Receiver<Message>, bridge: Bridge) -> Result<()> {
     let jobs = Rc::new(Jobs {
         queue: RefCell::new(VecDeque::new()),
         stopped: bridge.stopped.clone(),
@@ -181,6 +280,18 @@ fn run(source: String, events: Receiver<Event>, bridge: Bridge) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     ctx.register_global_builtin_callable(
+        js_string!("__slerm_system"),
+        1,
+        NativeFunction::from_fn_ptr(system_call),
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    ctx.register_global_builtin_callable(
+        js_string!("__slerm_timer"),
+        2,
+        NativeFunction::from_fn_ptr(timer),
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    ctx.register_global_builtin_callable(
         js_string!("__slerm_error"),
         1,
         NativeFunction::from_fn_ptr(host_error),
@@ -194,19 +305,51 @@ fn run(source: String, events: Receiver<Event>, bridge: Bridge) -> Result<()> {
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     execute(&mut ctx, include_str!("../sdk/runtime.js"))?;
     execute(&mut ctx, &source)?;
-    while let Ok(event) = events.recv() {
-        if ctx
-            .get_data::<Bridge>()
-            .unwrap()
-            .stopped
-            .load(Ordering::Relaxed)
-        {
+    loop {
+        let bridge = ctx.get_data::<Bridge>().unwrap();
+        if bridge.stopped.load(Ordering::Relaxed) {
             break;
         }
-        execute(
-            &mut ctx,
-            &format!("__slerm_dispatch({});", serde_json::to_string(&event)?),
-        )?;
+        let now = Instant::now();
+        let mut due = Vec::new();
+        let next = {
+            let mut timers = bridge.timers.borrow_mut();
+            while let Some(Reverse((deadline, handle))) = timers.peek().copied()
+                && deadline <= now
+            {
+                timers.pop();
+                due.push(handle);
+            }
+            timers.peek().map(|Reverse((deadline, _))| *deadline)
+        };
+        for handle in due {
+            execute(&mut ctx, &format!("__slerm_fire({handle});"))?;
+        }
+        // Wake for the next timer, and at least every 250 ms to notice a stop.
+        let wait = next
+            .map_or(Duration::MAX, |deadline| {
+                deadline.saturating_duration_since(now)
+            })
+            .min(Duration::from_millis(250));
+        match events.recv_timeout(wait) {
+            Ok(Message::Event(event)) => execute(
+                &mut ctx,
+                &format!("__slerm_dispatch({});", serde_json::to_string(&event)?),
+            )?,
+            Ok(Message::Done { id, reply }) => {
+                let bridge = ctx.get_data::<Bridge>().unwrap();
+                bridge.running.set(bridge.running.get() - 1);
+                execute(
+                    &mut ctx,
+                    &format!(
+                        "__slerm_complete({id}, {});",
+                        serde_json::to_string(&reply)?
+                    ),
+                )?
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
     }
     Ok(())
 }
@@ -216,13 +359,18 @@ pub struct Runtime {
     pub commands: BTreeMap<String, PluginCommand>,
     pub panels: BTreeMap<String, Panel>,
     pub last_state: Option<Value>,
-    outgoing: Option<SyncSender<Event>>,
+    outgoing: Option<SyncSender<Message>>,
     incoming: Option<Receiver<Result<Pending, String>>>,
     stopped: Arc<AtomicBool>,
 }
 
 impl Runtime {
-    pub fn spawn(config: &Plugin, config_dir: &Path, ctx: &egui::Context) -> Result<Self> {
+    pub fn spawn(
+        config: &Plugin,
+        config_dir: &Path,
+        env: Arc<BTreeMap<String, String>>,
+        ctx: &egui::Context,
+    ) -> Result<Self> {
         let path = config_dir.join(&config.path);
         let source = std::fs::read_to_string(&path)
             .with_context(|| format!("Cannot read plugin {} at {}", config.id, path.display()))?;
@@ -230,14 +378,18 @@ impl Runtime {
             source.len() <= 4 * MAX_MESSAGE,
             "plugin bundle exceeds 4 MiB"
         );
-        let (outgoing, events) = mpsc::sync_channel(64);
+        // Leave room for every running call to report back while the queue
+        // is full of UI events.
+        let (outgoing, events) = mpsc::sync_channel(64 + MAX_RUNNING);
         let (requests, incoming) = mpsc::sync_channel(64);
         let stopped = Arc::new(AtomicBool::new(false));
-        let bridge = Bridge {
-            requests: requests.clone(),
-            repaint: ctx.clone(),
-            stopped: stopped.clone(),
-        };
+        let bridge = Bridge::new(
+            requests.clone(),
+            ctx.clone(),
+            stopped.clone(),
+            outgoing.clone(),
+            env,
+        );
         let repaint = ctx.clone();
         thread::Builder::new()
             .name(format!("plugin-{}", config.id))
@@ -276,7 +428,7 @@ impl Runtime {
             "plugin event exceeds 1 MiB"
         );
         outgoing
-            .try_send(event)
+            .try_send(Message::Event(event))
             .context("plugin event queue is full or disconnected")
     }
 
@@ -304,6 +456,11 @@ impl Panel {
             !self.title.trim().is_empty() && self.title.len() <= 200,
             "invalid panel title"
         );
+        let keys = self.keys.as_deref().unwrap_or_default();
+        ensure!(keys.len() <= 64, "a panel declares at most 64 keys");
+        for key in keys {
+            crate::config::shortcut(key).with_context(|| format!("panel key {key}"))?;
+        }
         let mut ids = std::collections::HashSet::new();
         let mut count = 0;
         validate_elements(&self.elements, 0, &mut count, &mut ids)?;
@@ -325,19 +482,78 @@ fn validate_elements<'a>(
     count: &mut usize,
     ids: &mut std::collections::HashSet<&'a str>,
 ) -> Result<()> {
-    ensure!(depth <= 4, "rows nest at most 4 deep");
+    ensure!(depth <= 4, "rows and sections nest at most 4 deep");
     for element in elements {
         *count += 1;
         ensure!(*count <= 128, "a panel supports at most 128 elements");
         let id = match element {
-            Element::Button { id, .. } | Element::Input { id, .. } | Element::Tree { id, .. } => {
-                Some(id)
-            }
             Element::Row { elements } => {
                 validate_elements(elements, depth + 1, count, ids)?;
                 None
             }
-            _ => None,
+            Element::Section { id, elements, .. } => {
+                validate_elements(elements, depth + 1, count, ids)?;
+                Some(id)
+            }
+            Element::TextArea { id, rows, .. } => {
+                ensure!(
+                    rows.is_none_or(|rows| (1..=50).contains(&rows)),
+                    "text areas show 1 to 50 rows"
+                );
+                Some(id)
+            }
+            Element::Slider {
+                id,
+                value,
+                min,
+                max,
+                step,
+                ..
+            } => {
+                ensure!(
+                    value.is_finite() && min.is_finite() && max.is_finite() && min < max,
+                    "sliders need finite values and min < max"
+                );
+                ensure!(
+                    step.is_none_or(|step| step.is_finite() && step > 0.0),
+                    "slider steps must be positive"
+                );
+                Some(id)
+            }
+            Element::Select { id, options, .. } => {
+                ensure!(options.len() <= 256, "a select has at most 256 options");
+                Some(id)
+            }
+            Element::Progress { value, .. } => {
+                ensure!(value.is_finite(), "progress must be finite");
+                None
+            }
+            Element::Table {
+                id, columns, rows, ..
+            } => {
+                ensure!(
+                    (1..=16).contains(&columns.len()),
+                    "tables have 1 to 16 columns"
+                );
+                ensure!(rows.len() <= 4096, "a table has at most 4096 rows");
+                let mut row_ids = std::collections::HashSet::new();
+                for row in rows {
+                    ensure!(
+                        !row.id.is_empty() && row.id.len() <= 4096 && row_ids.insert(&row.id),
+                        "invalid or duplicate table row id"
+                    );
+                    ensure!(
+                        row.cells.len() == columns.len(),
+                        "each table row needs one cell per column"
+                    );
+                }
+                Some(id)
+            }
+            Element::Button { id, .. }
+            | Element::Input { id, .. }
+            | Element::Checkbox { id, .. }
+            | Element::Tree { id, .. } => Some(id),
+            Element::Text { .. } | Element::Separator | Element::Spinner => None,
         };
         if let Some(id) = id {
             ensure!(
@@ -390,12 +606,14 @@ impl Host {
     pub fn start(
         configs: &[Plugin],
         config_dir: &Path,
+        env: &BTreeMap<String, String>,
         ctx: &egui::Context,
     ) -> (Self, Vec<String>) {
         let mut host = Self::default();
         let mut errors = Vec::new();
+        let env = Arc::new(env.clone());
         for config in configs {
-            match Runtime::spawn(config, config_dir, ctx) {
+            match Runtime::spawn(config, config_dir, env.clone(), ctx) {
                 Ok(process) => host.runtimes.push(process),
                 Err(e) => errors.push(e.to_string()),
             }
@@ -412,6 +630,20 @@ impl Host {
         plugin.send(Event::Command {
             command: command.into(),
         })
+    }
+
+    /// Run a command by plugin ID, as a key binding does.
+    pub fn invoke_named(&self, plugin: &str, command: &str) -> Result<()> {
+        let index = self
+            .runtimes
+            .iter()
+            .position(|runtime| runtime.id == plugin && runtime.is_running())
+            .with_context(|| format!("plugin {plugin} is not running"))?;
+        ensure!(
+            self.runtimes[index].commands.contains_key(command),
+            "plugin {plugin} has no command {command}"
+        );
+        self.invoke(index, command)
     }
 
     pub fn show_panels(&mut self, ctx: &egui::Context) -> Vec<String> {
@@ -508,6 +740,29 @@ mod tests {
                 .validate()
                 .is_err()
         );
+        assert!(
+            panel(json!([{"type":"section", "id":"s", "title":"S", "elements":[
+                {"type":"slider", "id":"n", "value":1, "min":0, "max":2, "step":0.5},
+                {"type":"select", "id":"c", "value":"a", "options":["a", "b"]},
+                {"type":"table", "id":"t", "columns":["A", "B"], "rows":[{"id":"r", "cells":["1", "2"]}]},
+                {"type":"textArea", "id":"x", "value":"", "rows":4, "code":true},
+                {"type":"checkbox", "id":"k", "label":"K", "checked":true},
+                {"type":"progress", "value":0.5}, {"type":"spinner"},
+                {"type":"text", "text":"T", "style":"heading", "color":"error"}
+            ]}]))
+            .validate()
+            .is_ok()
+        );
+        for invalid in [
+            json!({"type":"slider", "id":"n", "value":1, "min":2, "max":2}),
+            json!({"type":"slider", "id":"n", "value":1, "min":0, "max":2, "step":0}),
+            json!({"type":"table", "id":"t", "columns":["A", "B"], "rows":[{"id":"r", "cells":["1"]}]}),
+            json!({"type":"table", "id":"t", "columns":[], "rows":[]}),
+            json!({"type":"textArea", "id":"x", "value":"", "rows":0}),
+            json!({"type":"section", "id":"s", "title":"S", "elements":[{"type":"button", "id":"s", "label":"B"}]}),
+        ] {
+            assert!(panel(json!([invalid])).validate().is_err(), "{invalid}");
+        }
         let mut deep = json!([]);
         for depth in 0..70 {
             deep = json!([node(&depth.to_string(), deep)]);
@@ -528,13 +783,15 @@ mod tests {
             "__slerm.activate({}, 999)",
             "process.exit(0)",
         ] {
-            let (_, events) = mpsc::sync_channel(1);
+            let (inbox, events) = mpsc::sync_channel(1);
             let (requests, _) = mpsc::sync_channel(1);
-            let bridge = Bridge {
+            let bridge = Bridge::new(
                 requests,
-                repaint: egui::Context::default(),
-                stopped: Arc::new(AtomicBool::new(false)),
-            };
+                egui::Context::default(),
+                Arc::new(AtomicBool::new(false)),
+                inbox,
+                Default::default(),
+            );
             assert!(
                 run(source.into(), events, bridge).is_err(),
                 "source should fail: {source}"

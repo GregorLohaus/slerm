@@ -33,7 +33,10 @@ pub struct Config {
     pub colors: BTreeMap<String, String>,
     pub kitty: Kitty,
     pub multiplexer: Multiplexer,
-    pub keys: BTreeMap<String, Action>,
+    pub keys: BTreeMap<String, Binding>,
+    /// Environment for panes and plugin processes. `$NAME` and `${NAME}` expand
+    /// from Slerm's own environment when the config loads; `$$` is a literal `$`.
+    pub env: BTreeMap<String, String>,
     pub plugins: Vec<Plugin>,
 }
 
@@ -62,6 +65,42 @@ pub struct Multiplexer {
     pub floating_height: f32,
     pub floating_max_width: f32,
     pub floating_max_height: f32,
+}
+
+/// What a `[keys]` entry runs: a built-in action, or `plugin:<id>/<command>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Binding {
+    Action(Action),
+    Plugin { plugin: String, command: String },
+}
+
+impl From<Action> for Binding {
+    fn from(action: Action) -> Self {
+        Self::Action(action)
+    }
+}
+
+impl<'de> Deserialize<'de> for Binding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let text = String::deserialize(deserializer)?;
+        let Some(target) = text.strip_prefix("plugin:") else {
+            let text = serde::de::value::StrDeserializer::<D::Error>::new(&text);
+            return Action::deserialize(text).map(Self::Action);
+        };
+        let (plugin, command) = target
+            .split_once('/')
+            .filter(|(plugin, command)| {
+                crate::plugins::valid_id(plugin) && crate::plugins::valid_id(command)
+            })
+            .ok_or_else(|| {
+                D::Error::custom(format!("expected plugin:<id>/<command>, got {text}"))
+            })?;
+        Ok(Self::Plugin {
+            plugin: plugin.into(),
+            command: command.into(),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, ts_rs::TS)]
@@ -137,6 +176,7 @@ impl Default for Config {
             kitty: Kitty::default(),
             multiplexer: Multiplexer::default(),
             plugins: Vec::new(),
+            env: BTreeMap::new(),
             keys: [
                 ("Alt+F", Action::ToggleFloats),
                 ("Alt+M", Action::NewPane),
@@ -155,7 +195,7 @@ impl Default for Config {
                 ("Ctrl+Shift+V", Action::Paste),
             ]
             .into_iter()
-            .map(|(k, v)| (k.into(), v))
+            .map(|(k, v)| (k.into(), v.into()))
             .collect(),
         }
     }
@@ -183,7 +223,16 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Self = toml::from_str(text)?;
+        let mut config: Self = toml::from_str(text)?;
+        for (name, value) in &mut config.env {
+            ensure!(
+                !name.is_empty() && !name.contains(['=', '\0']),
+                "invalid environment variable name: {name:?}"
+            );
+            *value = expand(value, |name| std::env::var(name).ok())
+                .with_context(|| format!("env.{name}"))?;
+            ensure!(!value.contains('\0'), "env.{name} contains a NUL byte");
+        }
         let mut plugin_ids = std::collections::HashSet::new();
         for plugin in &config.plugins {
             ensure!(
@@ -260,8 +309,15 @@ impl Config {
             );
         }
         config.theme()?;
-        for key in config.keys.keys() {
+        for (key, binding) in &config.keys {
             shortcut(key)?;
+            // Commands register at runtime, but a plugin ID typo shows up now.
+            if let Binding::Plugin { plugin, .. } = binding {
+                ensure!(
+                    config.plugins.iter().any(|p| &p.id == plugin),
+                    "{key} is bound to unknown plugin {plugin}"
+                );
+            }
         }
         Ok(config)
     }
@@ -285,6 +341,36 @@ impl Config {
         }
         Ok(theme)
     }
+}
+
+/// Expand `$NAME`, `${NAME}`, and `$$`. Unset variables expand to nothing, as in a shell.
+fn expand(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(index) = rest.find('$') {
+        out.push_str(&rest[..index]);
+        rest = &rest[index + 1..];
+        let name = if let Some(braced) = rest.strip_prefix('{') {
+            let end = braced.find('}').context("unclosed ${")?;
+            rest = &braced[end + 1..];
+            &braced[..end]
+        } else if let Some(after) = rest.strip_prefix('$') {
+            out.push('$');
+            rest = after;
+            continue;
+        } else {
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            rest = &rest[end..];
+            name
+        };
+        ensure!(!name.is_empty(), "expected a variable name after $");
+        out.push_str(&lookup(name).unwrap_or_default());
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// A `#RRGGBB` string as the packed integer a theme stores.
@@ -348,10 +434,49 @@ mod tests {
             "background = '#xx0000'",
             "font_sze = 16",
             "[keys]\n'Hyper+Q' = 'close_pane'",
+            "[keys]\n'Alt+B' = 'plugin:files'",
+            "[keys]\n'Alt+B' = 'plugin:files/show files'",
+            "[keys]\n'Alt+B' = 'plugin:missing/show-files'",
             "[multiplexer]\nfloating_width = 2",
         ] {
             assert!(Config::parse(text).is_err(), "accepted {text}");
         }
+    }
+
+    #[test]
+    fn expands_environment_values() {
+        let lookup = |name: &str| (name == "PATH").then(|| "/usr/bin:/bin".to_owned());
+        for (text, expanded) in [
+            ("/opt/bin:$PATH", "/opt/bin:/usr/bin:/bin"),
+            ("${PATH}/x", "/usr/bin:/bin/x"),
+            ("$UNSET-a", "-a"),
+            ("cost $$5", "cost $5"),
+            ("plain", "plain"),
+        ] {
+            assert_eq!(expand(text, lookup).unwrap(), expanded, "{text}");
+        }
+        for text in ["${PATH", "$", "a $ b", "${}"] {
+            assert!(expand(text, lookup).is_err(), "{text}");
+        }
+        let config = Config::parse("[env]\nSLERM_TEST = 'x:$$'\nEDITOR = 'hx'").unwrap();
+        assert_eq!(config.env["SLERM_TEST"], "x:$");
+        assert!(Config::parse("[env]\n'A=B' = 'x'").is_err());
+    }
+
+    #[test]
+    fn binds_keys_to_plugin_commands() {
+        let config = Config::parse(
+            "[[plugins]]\nid = 'files'\npath = 'files.js'\n[keys]\n'Super+B' = 'plugin:files/show-files'\n'Alt+X' = 'close_pane'",
+        )
+        .unwrap();
+        assert_eq!(
+            config.keys["Super+B"],
+            Binding::Plugin {
+                plugin: "files".into(),
+                command: "show-files".into()
+            }
+        );
+        assert_eq!(config.keys["Alt+X"], Action::ClosePane.into());
     }
 
     #[test]
@@ -370,7 +495,7 @@ mod tests {
             ("Alt+X", Action::ClosePane),
             ("Alt+S", Action::OpenScrollback),
         ] {
-            assert_eq!(config.keys.get(binding), Some(&action));
+            assert_eq!(config.keys.get(binding), Some(&action.into()));
             assert!(shortcut(binding).unwrap().modifiers.alt);
         }
     }

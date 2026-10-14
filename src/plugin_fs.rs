@@ -120,18 +120,18 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let dir = root.join("sub").to_str().unwrap().to_owned();
         let file = root.join("note.txt").to_str().unwrap().to_owned();
-        run(json!({"method": "createDir", "path": dir})).unwrap();
-        run(json!({"method": "writeFile", "path": file, "text": "hello"})).unwrap();
+        run(json!({"method": "createDir", "params": {"path": dir}})).unwrap();
+        run(json!({"method": "writeFile", "params": {"path": file, "text": "hello"}})).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("sub"), root.join("link")).unwrap();
         assert_eq!(
-            run(json!({"method": "readFile", "path": file})).unwrap(),
+            run(json!({"method": "readFile", "params": {"path": file}})).unwrap(),
             "hello"
         );
-        let stat = run(json!({"method": "stat", "path": file})).unwrap();
+        let stat = run(json!({"method": "stat", "params": {"path": file}})).unwrap();
         assert_eq!(stat["kind"], "file");
         assert_eq!(stat["size"], 5);
-        let entries = run(json!({"method": "readDir", "path": root})).unwrap();
+        let entries = run(json!({"method": "readDir", "params": {"path": root}})).unwrap();
         let names: Vec<_> = entries
             .as_array()
             .unwrap()
@@ -150,12 +150,14 @@ mod tests {
         // Removing a symlink to a directory removes only the link.
         #[cfg(unix)]
         {
-            run(json!({"method": "remove", "path": root.join("link")})).unwrap();
+            run(json!({"method": "remove", "params": {"path": root.join("link")}})).unwrap();
             assert!(root.join("sub").is_dir());
         }
-        assert!(run(json!({"method": "readDir", "path": "relative"})).is_err());
-        assert!(run(json!({"method": "readDir", "path": root.join("missing")})).is_err());
-        run(json!({"method": "remove", "path": root})).unwrap();
+        assert!(run(json!({"method": "readDir", "params": {"path": "relative"}})).is_err());
+        assert!(
+            run(json!({"method": "readDir", "params": {"path": root.join("missing")}})).is_err()
+        );
+        run(json!({"method": "remove", "params": {"path": root}})).unwrap();
         assert!(!root.exists());
     }
 }

@@ -76,7 +76,7 @@ impl App {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(std::path::Path::new("."));
-        let (plugins, errors) = Host::start(&config.plugins, config_dir, &cc.egui_ctx);
+        let (plugins, errors) = Host::start(&config.plugins, config_dir, &config.env, &cc.egui_ctx);
         Ok(Self {
             config,
             theme,
@@ -466,6 +466,32 @@ impl App {
             Operation::RemovePanel { panel } => {
                 self.plugins.runtimes[index].panels.remove(&panel);
             }
+            Operation::FocusPanel { panel, control } => {
+                let panel = self.plugins.runtimes[index]
+                    .panels
+                    .get_mut(&panel)
+                    .ok_or_else(|| anyhow::anyhow!("unknown panel {panel}"))?;
+                if let Some(control) = &control {
+                    let mut found = false;
+                    crate::plugin_ui::walk(&panel.elements, &mut |element| {
+                        found |= crate::plugin_ui::control_id(element) == Some(control);
+                    });
+                    ensure!(found, "unknown control {control}");
+                }
+                panel.focus_request = Some(control);
+                ctx.request_repaint();
+            }
+            Operation::Navigate { panel, control, to } => {
+                let plugin = &mut self.plugins.runtimes[index];
+                let panel = plugin
+                    .panels
+                    .get_mut(&panel)
+                    .ok_or_else(|| anyhow::anyhow!("unknown panel {panel}"))?;
+                for data in crate::plugin_ui::navigate(panel, &control, to)? {
+                    plugin.send(Event::Ui { data })?;
+                }
+                ctx.request_repaint();
+            }
             Operation::ReportError { message } => {
                 self.error = Some(format!(
                     "Plugin {}: {message}",
@@ -538,7 +564,8 @@ impl App {
         }
     }
 
-    fn keyboard(&mut self, ctx: &egui::Context) -> Result<()> {
+    /// Handle key bindings, and with `forward`, send other keys to the active pane.
+    fn keyboard(&mut self, ctx: &egui::Context, forward: bool) -> Result<()> {
         let events = ctx.input(|i| i.events.clone());
         let modifiers = ctx.input(|i| i.modifiers);
         let mut terminal_events = vec![];
@@ -556,7 +583,7 @@ impl App {
                 if !pressed && self.suppressed.remove(key) {
                     continue;
                 }
-                let action = self.config.keys.iter().find_map(|(s, a)| {
+                let binding = self.config.keys.iter().find_map(|(s, b)| {
                     let shortcut = config::shortcut(s).ok()?;
                     let m = shortcut.modifiers;
                     (shortcut.logical_key == *key
@@ -564,20 +591,28 @@ impl App {
                         && m.shift == modifiers.shift
                         && m.alt == modifiers.alt
                         && m.mac_cmd == modifiers.mac_cmd)
-                        .then_some(*a)
+                        .then(|| b.clone())
                 });
-                if *pressed && let Some(action) = action {
+                if *pressed && let Some(binding) = binding {
                     self.flush_keys(&mut terminal_events)?;
                     self.suppressed.insert(*key);
                     suppress_text = true;
                     if !repeat {
-                        self.action(action, ctx)?;
+                        match binding {
+                            config::Binding::Action(action) => self.action(action, ctx)?,
+                            config::Binding::Plugin { plugin, command } => {
+                                self.plugins.invoke_named(&plugin, &command)?
+                            }
+                        }
                     }
                     if self.tabs.is_empty() {
                         return Ok(());
                     }
                     continue;
                 }
+            }
+            if !forward {
+                continue;
             }
             if suppress_text && matches!(event, egui::Event::Text(_)) {
                 continue;
@@ -644,11 +679,19 @@ impl eframe::App for App {
         }
         // Native plugin text fields must receive typing without forwarding it to the PTY.
         let editing_ui = ctx.memory(|m| m.focused().is_some_and(|id| id != egui::Id::new("keys")));
+        // Bindings still work while a plugin list has focus, but not while typing.
+        let typing = self
+            .plugins
+            .runtimes
+            .iter()
+            .any(|plugin| plugin.panels.values().any(|panel| panel.editing.is_some()));
         if !editing_ui {
             grab_keys(ctx);
-            if let Err(e) = self.keyboard(ctx) {
-                self.error = Some(e.to_string());
-            }
+        }
+        if (!editing_ui || !typing)
+            && let Err(e) = self.keyboard(ctx, !editing_ui)
+        {
+            self.error = Some(e.to_string());
         }
         if self.tabs.is_empty() {
             return;
@@ -704,7 +747,16 @@ impl eframe::App for App {
                         for (index, plugin) in self.plugins.runtimes.iter().enumerate() {
                             ui.menu_button(&plugin.id, |ui| {
                                 for command in plugin.commands.values() {
-                                    if ui.button(&command.title).clicked() {
+                                    let bound = config::Binding::Plugin {
+                                        plugin: plugin.id.clone(),
+                                        command: command.id.clone(),
+                                    };
+                                    let key = self.config.keys.iter().find(|(_, b)| **b == bound);
+                                    let mut button = egui::Button::new(&command.title);
+                                    if let Some((key, _)) = key {
+                                        button = button.shortcut_text(key);
+                                    }
+                                    if ui.add(button).clicked() {
                                         plugin_command = Some((index, command.id.clone()));
                                         ui.close();
                                     }
@@ -1124,6 +1176,7 @@ mod tests {
                 path: path.clone(),
             }],
             std::path::Path::new("."),
+            &Default::default(),
             &ctx,
         );
         std::fs::remove_file(path).unwrap();
@@ -1154,31 +1207,109 @@ mod tests {
     }
 
     #[test]
+    fn plugins_use_timers_and_slow_calls_without_blocking_events() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        let path = std::env::temp_dir().join(format!("slerm-async-{}.js", std::process::id()));
+        std::fs::write(&path, r#"
+            const command = (api, id, title) => api.registerCommand({command:{id, title: String(title)}});
+            __slerm.activate({
+                async activate(api) {
+                    let ticks = 0;
+                    const interval = setInterval(async () => {
+                        if (++ticks === 3) { clearInterval(interval); await command(api, 'ticked', ticks); }
+                    }, 10);
+                    setTimeout((a, b) => command(api, 'timeout', a + b), 20, 'x', 'y');
+                    clearTimeout(setTimeout(() => command(api, 'cleared', ''), 0));
+                    __slerm.system.run({program:'/bin/sh', args:['-c', 'sleep 1; echo slow'], cwd:'/'})
+                        .then(out => command(api, 'slow', out.stdout.trim()));
+                    const home = await __slerm.system.env({name:'HOME'});
+                    const rejected = await __slerm.system.fetch({url:'file:///etc/hosts'}).then(() => false, () => true);
+                    await command(api, 'ready', rejected && typeof home === 'string');
+                },
+                async onEvent(event, api) {
+                    if (event.event === 'command' && event.command === 'ready') await command(api, 'fast', 'fast');
+                }
+            }, 1);
+        "#).unwrap();
+        let (host, errors) = Host::start(
+            &[config::Plugin {
+                id: "test".into(),
+                path: path.clone(),
+            }],
+            std::path::Path::new("."),
+            &Default::default(),
+            &ctx,
+        );
+        std::fs::remove_file(path).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        app.plugins = host;
+        let title = |app: &App, id: &str| {
+            app.plugins.runtimes[0]
+                .commands
+                .get(id)
+                .map(|command| command.title.clone())
+        };
+        pump_plugins(&mut app, &ctx, |app| title(app, "ready").is_some());
+        assert_eq!(title(&app, "ready").as_deref(), Some("true"));
+        // A key binding runs the command while the process is still sleeping.
+        app.plugins.invoke_named("test", "ready").unwrap();
+        assert!(app.plugins.invoke_named("test", "missing").is_err());
+        assert!(app.plugins.invoke_named("other", "ready").is_err());
+        pump_plugins(&mut app, &ctx, |app| title(app, "fast").is_some());
+        assert!(title(&app, "slow").is_none());
+        pump_plugins(&mut app, &ctx, |app| {
+            ["slow", "ticked", "timeout"]
+                .iter()
+                .all(|id| title(app, id).is_some())
+        });
+        assert_eq!(title(&app, "slow").as_deref(), Some("slow"));
+        assert_eq!(title(&app, "ticked").as_deref(), Some("3"));
+        assert_eq!(title(&app, "timeout").as_deref(), Some("xy"));
+        assert!(title(&app, "cleared").is_none());
+    }
+
+    #[test]
     #[ignore = "build the example first: npm run example --prefix sdk"]
     fn bundled_typescript_example_runs_in_boa() {
         let ctx = egui::Context::default();
         let mut app = test_app(&ctx);
         let (host, errors) = Host::start(
             &[config::Plugin {
-                id: "workspace".into(),
-                path: "sdk/dist/workspace.js".into(),
+                id: "panes".into(),
+                path: "sdk/dist/panes.js".into(),
             }],
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &Default::default(),
             &ctx,
         );
         assert!(errors.is_empty(), "{errors:?}");
         app.plugins = host;
         pump_plugins(&mut app, &ctx, |app| {
-            app.plugins.runtimes[0].panels.contains_key("workspace")
+            app.plugins.runtimes[0]
+                .commands
+                .contains_key("toggle-panes")
         });
-        app.plugins.runtimes[0]
-            .send(Event::Ui {
-                data: crate::plugin_api::UIEvent::Click {
-                    panel: "workspace".into(),
-                    control: "scratch".into(),
-                },
-            })
-            .unwrap();
+        app.plugins.invoke_named("panes", "toggle-panes").unwrap();
+        pump_plugins(&mut app, &ctx, |app| {
+            app.plugins.runtimes[0].panels.contains_key("panes")
+        });
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            assert!(app.plugins.show_panels(ctx).is_empty());
+        });
+        for data in [
+            crate::plugin_api::UIEvent::Change {
+                panel: "panes".into(),
+                control: "action".into(),
+                value: "new_floating".into(),
+            },
+            crate::plugin_api::UIEvent::Click {
+                panel: "panes".into(),
+                control: "run".into(),
+            },
+        ] {
+            app.plugins.runtimes[0].send(Event::Ui { data }).unwrap();
+        }
         pump_plugins(&mut app, &ctx, |app| app.tabs[0].floats.len() == 1);
 
         // The file tree reads the real filesystem through Boa and renders natively.
@@ -1198,6 +1329,7 @@ mod tests {
                 path: "sdk/dist/filetree.js".into(),
             }],
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &Default::default(),
             &ctx,
         );
         assert!(errors.is_empty(), "{errors:?}");
@@ -1220,7 +1352,17 @@ mod tests {
                 })
         };
         let src = format!("{root}/src");
+        pump_plugins(&mut app, &ctx, |app| {
+            app.plugins.runtimes[0]
+                .commands
+                .contains_key("toggle-files")
+        });
+        app.plugins.invoke_named("files", "toggle-files").unwrap();
         pump_plugins(&mut app, &ctx, |app| has_node(app, &src));
+        // The toggle also focuses the tree.
+        pump_plugins(&mut app, &ctx, |app| {
+            app.plugins.runtimes[0].panels["files"].focus_request == Some(Some("tree".into()))
+        });
         app.plugins.runtimes[0]
             .send(Event::Ui {
                 data: crate::plugin_api::UIEvent::Toggle {

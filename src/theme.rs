@@ -202,6 +202,8 @@ impl Theme {
         visuals.selection.bg_fill = color(self.selection_bg);
         visuals.selection.stroke = egui::Stroke::new(1.0_f32, accent);
         visuals.hyperlink_color = accent;
+        visuals.warn_fg_color = color(self.ansi[3]);
+        visuals.error_fg_color = color(self.ansi[1]);
         visuals.window_stroke = egui::Stroke::new(1.0_f32, color(self.border));
         visuals
     }

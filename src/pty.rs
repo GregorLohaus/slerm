@@ -32,6 +32,9 @@ impl Pty {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "slerm");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        for (name, value) in &config.env {
+            cmd.env(name, value);
+        }
         #[cfg(unix)]
         configure_utf8_locale(&mut cmd);
         if let Some(dir) = cwd.or(config.working_directory.as_deref()) {

@@ -61,6 +61,12 @@ floating_height = 0.65
 floating_max_width = 960
 floating_max_height = 640
 
+# Environment for panes and plugin processes. $NAME and ${NAME} expand from
+# Slerm's environment, which is minimal for apps started from the Dock or Finder.
+# [env]
+# PATH = "/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
+# EDITOR = "hx"
+
 # Providing [keys] replaces the entire default map.
 [keys]
 "Alt+F" = "toggle_floats"
@@ -80,10 +86,12 @@ floating_max_height = 640
 "Ctrl+Shift+R" = "reload_config"
 "Ctrl+Shift+C" = "copy"
 "Ctrl+Shift+V" = "paste"
+# Plugin commands bind as "plugin:<id>/<command>", e.g.
+# "Super+G" = "plugin:git/toggle-git"
 
 # TypeScript plugins compile to JavaScript bundles and run in embedded Boa.
 # See sdk/README.md. Relative paths resolve beside this configuration file.
 # Restart Slerm after changing a plugin bundle or these entries.
 # [[plugins]]
-# id = "workspace"
-# path = "plugins/workspace.js"
+# id = "panes"
+# path = "plugins/panes.js"

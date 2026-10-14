@@ -29,3 +29,15 @@ api.setPanel({ panel: { id: "files", title: "Files", placement: "left", elements
 ] } });
 // @ts-expect-error Tree nodes are generated from the Rust struct.
 api.setPanel({ panel: { id: "files", title: "Files", elements: [{ type: "tree", id: "tree", nodes: [{ id: "a", label: "a", depth: 0 }] }] } });
+
+import { system, type RunOutput, type FetchResponse } from "../src/index.js";
+const ran: Promise<RunOutput> = system.run({ program: "git", args: ["status"], cwd: "/" });
+const fetched: Promise<FetchResponse> = system.fetch({ url: "https://example.com", method: "POST", headers: { accept: "text/plain" }, body: "" });
+const home: Promise<string | null> = system.env({ name: "HOME" });
+void ran; void fetched; void home;
+// @ts-expect-error run needs a working directory.
+system.run({ program: "git" });
+const handle: number = setTimeout((a: string) => void a, 10, "x");
+clearTimeout(handle);
+// @ts-expect-error Timer arguments match the callback.
+setTimeout((a: string) => void a, 10, 1);

@@ -1,6 +1,7 @@
 //! The source of truth for the plugin API and its generated TypeScript bindings.
 use crate::config::Action;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use ts_rs::TS;
 
 pub const API_VERSION: u32 = 1;
@@ -8,11 +9,12 @@ pub const API_VERSION: u32 = 1;
 // Declare each method, its parameters and its result once. The enum drives Rust
 // dispatch; the generated result map drives the TypeScript client's signatures.
 macro_rules! plugin_api {
-    ($operation:ident, $results:ident; $($variant:ident => $method:ident { $($(#[$attr:meta])* $arg:ident: $ty:ty),* } -> $result:ty;)+) => {
+    ($operation:ident, $results:ident; $($(#[$doc:meta])* $variant:ident => $method:ident { $($(#[$attr:meta])* $arg:ident: $ty:ty),* } -> $result:ty;)+) => {
         #[derive(Debug, Deserialize, TS)]
-        #[serde(tag = "method", rename_all = "camelCase", deny_unknown_fields)]
+        // Parameters sit under `params`, so a parameter may itself be named `method`.
+        #[serde(tag = "method", content = "params", rename_all = "camelCase", deny_unknown_fields)]
         pub enum $operation {
-            $($variant { $($(#[$attr])* $arg: $ty),* },)+
+            $($(#[$doc])* $variant { $($(#[$attr])* $arg: $ty),* },)+
         }
         #[derive(TS)]
         #[allow(dead_code, non_snake_case)]
@@ -32,6 +34,10 @@ plugin_api! { Operation, Results;
     UnregisterCommand => unregisterCommand { command: String } -> ();
     SetPanel => setPanel { panel: Panel } -> ();
     RemovePanel => removePanel { panel: String } -> ();
+    /// Give keyboard focus to a control, or to the panel's first list or text field.
+    FocusPanel => focusPanel { panel: String, #[serde(default)] #[ts(optional)] control: Option<String> } -> ();
+    /// Move a tree or table as its arrow keys would, emitting the same UI events.
+    Navigate => navigate { panel: String, control: String, to: Navigation } -> ();
     ReportError => reportError { message: String } -> ();
 }
 
@@ -45,6 +51,47 @@ plugin_api! { FsOperation, FsResults;
     CreateDir => createDir { path: String } -> ();
     Remove => remove { path: String } -> ();
     Rename => rename { from: String, to: String } -> ();
+}
+
+// System operations reach outside Slerm. `run` and `fetch` resolve when they
+// finish, on their own threads, so the plugin keeps handling events meanwhile.
+plugin_api! { SystemOperation, SystemResults;
+    Run => run {
+        program: String,
+        #[serde(default)] #[ts(optional)] args: Option<Vec<String>>,
+        cwd: String,
+        #[serde(default)] #[ts(optional)] stdin: Option<String>,
+        /// Milliseconds before the process is killed; defaults to 30 seconds.
+        #[serde(default)] #[ts(optional)] timeout: Option<f64>
+    } -> RunOutput;
+    Fetch => fetch {
+        url: String,
+        #[serde(default)] #[ts(optional)] method: Option<String>,
+        #[serde(default)] #[ts(optional)] headers: Option<BTreeMap<String, String>>,
+        #[serde(default)] #[ts(optional)] body: Option<String>,
+        /// Milliseconds for the whole request; defaults to 30 seconds.
+        #[serde(default)] #[ts(optional)] timeout: Option<f64>
+    } -> FetchResponse;
+    Env => env { name: String } -> Option<String>;
+}
+
+/// `status` is null when a signal ended the process, including a timeout.
+#[derive(Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RunOutput {
+    pub status: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+/// Any HTTP status resolves; only network and protocol failures reject.
+#[derive(Debug, Serialize, TS)]
+pub struct FetchResponse {
+    pub status: u16,
+    /// Lowercase names; repeated headers are joined with ", ".
+    pub headers: BTreeMap<String, String>,
+    pub body: String,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
@@ -121,10 +168,43 @@ pub struct Panel {
     #[serde(default)]
     #[ts(optional)]
     pub placement: Option<PanelPlacement>,
+    /// Shortcuts sent as `key` events while a list in this panel has focus,
+    /// such as `"J"`, `"Shift+G"`, or `"Ctrl+D"`. Text fields keep their typing.
+    #[serde(default)]
+    #[ts(optional)]
+    pub keys: Option<Vec<String>>,
     /// Expansion and selection belong to the host and survive panel updates.
     #[serde(skip)]
     #[ts(skip)]
-    pub trees: std::collections::HashMap<String, crate::plugin_ui::TreeState>,
+    pub lists: std::collections::HashMap<String, crate::plugin_ui::ListState>,
+    /// The list control that had keyboard focus in the last frame.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub focused: Option<String>,
+    /// A pending `focusPanel`: a control ID, or None for the first focusable control.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub focus_request: Option<Option<String>>,
+    /// The text field the user is typing in, whose local value outranks updates.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub editing: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum Navigation {
+    Next,
+    Previous,
+    First,
+    Last,
+    PageDown,
+    PageUp,
+    /// Collapse a tree row, or move to its parent.
+    Left,
+    /// Expand a tree row, or move to its first child.
+    Right,
+    Activate,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, TS)]
@@ -162,26 +242,134 @@ impl TreeNode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum TextStyle {
+    Heading,
+    Strong,
+    Weak,
+    Small,
+    Monospace,
+}
+
+/// Theme colors, so plugin text follows the active theme.
+#[derive(Clone, Copy, Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum TextColor {
+    Accent,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct TableRow {
+    pub id: String,
+    pub cells: Vec<String>,
+}
+
+/// Controls with an `id` emit UI events. Values a user edits (`value`,
+/// `checked`, `selected`) change locally until the plugin sends the panel again.
 #[derive(Clone, Debug, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Element {
     Text {
         text: String,
+        #[serde(default)]
+        #[ts(optional)]
+        style: Option<TextStyle>,
+        #[serde(default)]
+        #[ts(optional)]
+        color: Option<TextColor>,
     },
+    /// Emits `click`.
     Button {
         id: String,
         label: String,
     },
+    /// A single-line text field. Emits `change`.
     Input {
         id: String,
         label: String,
         value: String,
     },
+    /// A multi-line text field. Emits `change` unless read-only.
+    TextArea {
+        id: String,
+        value: String,
+        /// Visible lines; defaults to 6.
+        #[serde(default)]
+        #[ts(optional)]
+        rows: Option<u32>,
+        /// Monospace text, as in a code editor.
+        #[serde(default)]
+        #[ts(optional)]
+        code: Option<bool>,
+        #[serde(default)]
+        #[ts(optional)]
+        readonly: Option<bool>,
+    },
+    /// Emits `check`.
+    Checkbox {
+        id: String,
+        label: String,
+        checked: bool,
+    },
+    /// Emits `number` when the user releases the slider.
+    Slider {
+        id: String,
+        #[serde(default)]
+        #[ts(optional)]
+        label: Option<String>,
+        value: f64,
+        min: f64,
+        max: f64,
+        #[serde(default)]
+        #[ts(optional)]
+        step: Option<f64>,
+    },
+    /// A dropdown. Emits `change` with the chosen option.
+    Select {
+        id: String,
+        #[serde(default)]
+        #[ts(optional)]
+        label: Option<String>,
+        value: String,
+        options: Vec<String>,
+    },
+    /// A bar from 0 to 1, labeled with `text` or a percentage.
+    Progress {
+        value: f32,
+        #[serde(default)]
+        #[ts(optional)]
+        text: Option<String>,
+    },
+    Spinner,
     Separator,
     /// Lays out its elements horizontally.
     Row {
         elements: Vec<Element>,
     },
+    /// A collapsible group. Slerm remembers whether it is open.
+    Section {
+        id: String,
+        title: String,
+        /// Whether the section starts open; defaults to true.
+        #[serde(default)]
+        #[ts(optional)]
+        open: Option<bool>,
+        elements: Vec<Element>,
+    },
+    /// Rows of text cells. Emits `select` and `activate` with the row ID.
+    Table {
+        id: String,
+        columns: Vec<String>,
+        rows: Vec<TableRow>,
+        #[serde(default)]
+        #[ts(optional)]
+        selected: Option<String>,
+    },
+    /// Emits `select`, `toggle`, and `activate` with the node ID.
     Tree {
         id: String,
         nodes: Vec<TreeNode>,
@@ -210,6 +398,22 @@ pub enum UIEvent {
     Click {
         panel: String,
         control: String,
+    },
+    Check {
+        panel: String,
+        control: String,
+        checked: bool,
+    },
+    Number {
+        panel: String,
+        control: String,
+        value: f64,
+    },
+    /// A declared shortcut; `control` is the focused list.
+    Key {
+        panel: String,
+        control: String,
+        key: String,
     },
     Change {
         panel: String,
@@ -245,10 +449,18 @@ pub fn typescript() -> String {
         FileKind::decl(&config),
         DirEntry::decl(&config),
         FileStat::decl(&config),
+        SystemOperation::decl(&config),
+        SystemResults::decl(&config),
+        RunOutput::decl(&config),
+        FetchResponse::decl(&config),
         PluginCommand::decl(&config),
         Panel::decl(&config),
         PanelPlacement::decl(&config),
+        Navigation::decl(&config),
         TreeNode::decl(&config),
+        TextStyle::decl(&config),
+        TextColor::decl(&config),
+        TableRow::decl(&config),
         Element::decl(&config),
         UIEvent::decl(&config),
         Event::decl(&config),
@@ -257,12 +469,14 @@ pub fn typescript() -> String {
         output.push_str(&declaration);
         output.push_str("\n\n");
     }
-    output.push_str(r#"type Params<O, M> = Omit<Extract<O, { method: M }>, "method">;
+    output.push_str(r#"type Params<O, M> = Extract<O, { method: M }> extends { params: infer P } ? P : never;
 type Client<O extends { method: string }, R extends Record<O["method"], unknown>> = {
-  [M in O["method"]]: (...args: keyof Params<O, M> extends never ? [] : [params: Params<O, M>]) => Promise<R[M] extends null ? void : R[M]>;
+  // ts-rs renders an empty parameter list as Record<symbol, never>.
+  [M in O["method"]]: (...args: keyof Params<O, M> extends symbol ? [] : [params: Params<O, M>]) => Promise<R[M] extends null ? void : R[M]>;
 };
 export type Slerm = Client<Operation, Results>;
 export type Fs = Client<FsOperation, FsResults>;
+export type System = Client<SystemOperation, SystemResults>;
 "#);
     output
 }
