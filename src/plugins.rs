@@ -1,7 +1,7 @@
 //! Embedded Boa runtimes, one worker thread per plugin. UI mutations stay on the UI thread.
 use crate::{
     config::Plugin,
-    plugin_api::{API_VERSION, Element, Event, Operation, Panel, PluginCommand, UIEvent},
+    plugin_api::{API_VERSION, Element, Event, Operation, Panel, PanelPlacement, PluginCommand},
 };
 use anyhow::{Context as _, Result, ensure};
 use boa_engine::{
@@ -46,7 +46,7 @@ struct Bridge {
     stopped: Arc<AtomicBool>,
 }
 
-fn host_call(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+fn request<T: serde::de::DeserializeOwned>(args: &[JsValue], ctx: &mut Context) -> JsResult<T> {
     let text = args
         .first()
         .unwrap_or(&JsValue::undefined())
@@ -57,8 +57,11 @@ fn host_call(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
             .with_message("plugin request exceeds 1 MiB")
             .into());
     }
-    let operation = serde_json::from_str(&text)
-        .map_err(|e| JsNativeError::typ().with_message(e.to_string()))?;
+    serde_json::from_str(&text).map_err(|e| JsNativeError::typ().with_message(e.to_string()).into())
+}
+
+fn host_call(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let operation: Operation = request(args, ctx)?;
     let bridge = ctx.get_data::<Bridge>().unwrap();
     let (reply, response) = mpsc::sync_channel(1);
     bridge
@@ -83,6 +86,15 @@ fn host_call(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
             }
         }
     }
+}
+
+// Filesystem calls block only this plugin's worker, never the UI thread.
+fn fs_call(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let reply = match crate::plugin_fs::call(request(args, ctx)?) {
+        Ok(result) => serde_json::json!({"result": result}),
+        Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+    };
+    Ok(js_string!(serde_json::to_string(&reply).unwrap()).into())
 }
 
 fn host_error(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -158,6 +170,12 @@ fn run(source: String, events: Receiver<Event>, bridge: Bridge) -> Result<()> {
         js_string!("__slerm_call"),
         1,
         NativeFunction::from_fn_ptr(host_call),
+    )
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    ctx.register_global_builtin_callable(
+        js_string!("__slerm_fs"),
+        1,
+        NativeFunction::from_fn_ptr(fs_call),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     ctx.register_global_builtin_callable(
@@ -289,9 +307,48 @@ impl Panel {
             "a panel supports at most 128 elements"
         );
         let mut ids = std::collections::HashSet::new();
+        let mut total_rows = 0;
         for element in &self.elements {
+            if let Element::Tree { rows, selected, .. } = element {
+                total_rows += rows.len();
+                ensure!(
+                    total_rows <= 8192,
+                    "a panel supports at most 8192 tree rows"
+                );
+                let mut row_ids = std::collections::HashSet::new();
+                for (index, row) in rows.iter().enumerate() {
+                    ensure!(
+                        !row.id.is_empty() && row.id.len() <= 4096 && row_ids.insert(&row.id),
+                        "invalid or duplicate tree row id"
+                    );
+                    ensure!(
+                        row.label.len() <= 4096 && row.depth <= 32,
+                        "tree label or depth limit exceeded"
+                    );
+                    ensure!(
+                        !row.expanded || row.expandable,
+                        "only expandable rows can be expanded"
+                    );
+                    if index == 0 {
+                        ensure!(row.depth == 0, "first tree row must have depth zero");
+                    } else {
+                        let previous = &rows[index - 1];
+                        ensure!(row.depth <= previous.depth + 1, "tree depth skips a level");
+                        ensure!(
+                            row.depth <= previous.depth || previous.expanded,
+                            "children require an expanded parent"
+                        );
+                    }
+                }
+                ensure!(
+                    selected.as_ref().is_none_or(|id| row_ids.contains(id)),
+                    "selected tree row does not exist"
+                );
+            }
             let id = match element {
-                Element::Button { id, .. } | Element::Input { id, .. } => Some(id),
+                Element::Button { id, .. }
+                | Element::Input { id, .. }
+                | Element::Tree { id, .. } => Some(id),
                 _ => None,
             };
             if let Some(id) = id {
@@ -308,6 +365,7 @@ impl Panel {
 #[derive(Default)]
 pub struct Host {
     pub runtimes: Vec<Runtime>,
+    pub next_state_poll: Option<Instant>,
 }
 
 impl Host {
@@ -343,63 +401,32 @@ impl Host {
         for plugin in &mut self.runtimes {
             let mut events = Vec::new();
             for panel in plugin.panels.values_mut() {
-                egui::Window::new(&panel.title)
-                    .id(egui::Id::new(("plugin panel", &plugin.id, &panel.id)))
-                    .order(egui::Order::Foreground)
-                    .default_width(280.0)
-                    .show(ctx, |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(500.0)
-                            .show(ui, |ui| {
-                                for element in &mut panel.elements {
-                                    match element {
-                                        Element::Text { text } => {
-                                            ui.label(text.as_str());
-                                        }
-                                        Element::Separator => {
-                                            ui.separator();
-                                        }
-                                        Element::Button { id, label } => {
-                                            if ui
-                                                .push_id(id.as_str(), |ui| {
-                                                    ui.button(label.as_str())
-                                                })
-                                                .inner
-                                                .clicked()
-                                            {
-                                                events.push(Event::Ui {
-                                                    data: UIEvent::Click {
-                                                        panel: panel.id.clone(),
-                                                        control: id.clone(),
-                                                    },
-                                                });
-                                            }
-                                        }
-                                        Element::Input { id, label, value } => {
-                                            ui.label(label.as_str());
-                                            if ui
-                                                .add(
-                                                    egui::TextEdit::singleline(value)
-                                                        .id_source(id.as_str()),
-                                                )
-                                                .changed()
-                                            {
-                                                events.push(Event::Ui {
-                                                    data: UIEvent::Change {
-                                                        panel: panel.id.clone(),
-                                                        control: id.clone(),
-                                                        value: value.clone(),
-                                                    },
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
+                let id = egui::Id::new(("plugin panel", &plugin.id, &panel.id));
+                match panel.placement.unwrap_or(PanelPlacement::Floating) {
+                    PanelPlacement::Floating => {
+                        egui::Window::new(&panel.title)
+                            .id(id)
+                            .order(egui::Order::Foreground)
+                            .default_size(egui::vec2(280.0, 420.0))
+                            .show(ctx, |ui| crate::plugin_ui::show(ui, panel, &mut events));
+                    }
+                    placement => {
+                        let side = match placement {
+                            PanelPlacement::Left => egui::SidePanel::left(id),
+                            _ => egui::SidePanel::right(id),
+                        };
+                        side.resizable(true)
+                            .default_width(260.0)
+                            .width_range(160.0..=600.0)
+                            .show(ctx, |ui| {
+                                ui.heading(&panel.title);
+                                crate::plugin_ui::show(ui, panel, &mut events);
                             });
-                    });
+                    }
+                }
             }
             for event in events {
-                if let Err(e) = plugin.send(event) {
+                if let Err(e) = plugin.send(Event::Ui { data: event }) {
                     errors.push(format!("{}: {e}", plugin.id));
                 }
             }

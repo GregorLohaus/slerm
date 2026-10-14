@@ -275,6 +275,7 @@
                 pkgs.rustc
                 pkgs.rustfmt
                 pkgs.clippy
+                pkgs.nodejs
                 zig
               ];
               shellHook = ''

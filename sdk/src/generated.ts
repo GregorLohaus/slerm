@@ -4,27 +4,47 @@ export const apiVersion = 1 as const;
 
 export type Action = "split_right" | "split_down" | "new_floating" | "new_pane" | "toggle_floating" | "toggle_floats" | "next_pane" | "previous_pane" | "focus_left" | "focus_down" | "focus_up" | "focus_right" | "close_pane" | "zoom_pane" | "new_tab" | "next_tab" | "previous_tab" | "reload_config" | "copy" | "paste" | "open_scrollback";
 
-export type Operation = { "method": "getState", } | { "method": "execute", action: Action, } | { "method": "focusPane", pane: number, } | { "method": "focusTab", tab: number, } | { "method": "readTerminal", pane: number, } | { "method": "writeTerminal", pane: number, text: string, } | { "method": "registerCommand", command: PluginCommand, } | { "method": "unregisterCommand", command: string, } | { "method": "setPanel", panel: Panel, } | { "method": "removePanel", panel: string, } | { "method": "reportError", message: string, };
+export type Operation = { "method": "getState", } | { "method": "execute", action: Action, } | { "method": "focusPane", pane: number, } | { "method": "focusTab", tab: number, } | { "method": "readTerminal", pane: number, } | { "method": "writeTerminal", pane: number, text: string, } | { "method": "openTerminal", program: string, args: Array<string>, cwd: string, } | { "method": "registerCommand", command: PluginCommand, } | { "method": "unregisterCommand", command: string, } | { "method": "setPanel", panel: Panel, } | { "method": "removePanel", panel: string, } | { "method": "reportError", message: string, };
 
-export type Results = { getState: State, execute: null, focusPane: null, focusTab: null, readTerminal: string, writeTerminal: null, registerCommand: null, unregisterCommand: null, setPanel: null, removePanel: null, reportError: null, };
+export type Results = { getState: State, execute: null, focusPane: null, focusTab: null, readTerminal: string, writeTerminal: null, openTerminal: PaneState, registerCommand: null, unregisterCommand: null, setPanel: null, removePanel: null, reportError: null, };
 
 export type State = { activeTab: number | null, tabs: Array<TabState>, };
 
 export type TabState = { id: number, activePane: number, floatsVisible: boolean, zoomed: boolean, panes: Array<PaneState>, };
 
-export type PaneState = { id: number, title: string, floating: boolean, exited: boolean, };
+export type PaneState = { id: number, title: string, floating: boolean, exited: boolean, cwd: string | null, };
+
+export type FsOperation = { "method": "readDir", path: string, } | { "method": "stat", path: string, } | { "method": "readFile", path: string, } | { "method": "writeFile", path: string, text: string, } | { "method": "createDir", path: string, } | { "method": "remove", path: string, } | { "method": "rename", from: string, to: string, };
+
+export type FsResults = { readDir: Array<DirEntry>, stat: FileStat, readFile: string, writeFile: null, createDir: null, remove: null, rename: null, };
+
+export type FileKind = "file" | "directory" | "other";
+
+export type DirEntry = { name: string, path: string, kind: FileKind, symlink: boolean, };
+
+export type FileStat = { kind: FileKind, symlink: boolean, size: number, 
+/**
+ * Milliseconds since the Unix epoch, when the platform reports it.
+ */
+modified: number | null, };
 
 export type PluginCommand = { id: string, title: string, };
 
-export type Panel = { id: string, title: string, elements: Array<Element>, };
+export type Panel = { id: string, title: string, elements: Array<Element>, placement?: PanelPlacement, };
 
-export type Element = { "type": "text", text: string, } | { "type": "button", id: string, label: string, } | { "type": "input", id: string, label: string, value: string, } | { "type": "separator" };
+export type PanelPlacement = "floating" | "left" | "right";
 
-export type UIEvent = { "kind": "click", panel: string, control: string, } | { "kind": "change", panel: string, control: string, value: string, };
+export type TreeRow = { id: string, label: string, depth: number, expandable: boolean, expanded: boolean, };
+
+export type Element = { "type": "text", text: string, } | { "type": "button", id: string, label: string, } | { "type": "input", id: string, label: string, value: string, } | { "type": "separator" } | { "type": "tree", id: string, rows: Array<TreeRow>, selected: string | null, };
+
+export type UIEvent = { "kind": "select", panel: string, control: string, item: string, } | { "kind": "activate", panel: string, control: string, item: string, } | { "kind": "toggle", panel: string, control: string, item: string, expanded: boolean, } | { "kind": "click", panel: string, control: string, } | { "kind": "change", panel: string, control: string, value: string, };
 
 export type Event = { "event": "command", command: string, } | { "event": "state", state: State, } | { "event": "ui", data: UIEvent, };
 
-type Params<M extends Operation["method"]> = Omit<Extract<Operation, { method: M }>, "method">;
-export type Slerm = {
-  [M in Operation["method"]]: (...args: keyof Params<M> extends never ? [] : [params: Params<M>]) => Promise<Results[M] extends null ? void : Results[M]>;
+type Params<O, M> = Omit<Extract<O, { method: M }>, "method">;
+type Client<O extends { method: string }, R extends Record<O["method"], unknown>> = {
+  [M in O["method"]]: (...args: keyof Params<O, M> extends never ? [] : [params: Params<O, M>]) => Promise<R[M] extends null ? void : R[M]>;
 };
+export type Slerm = Client<Operation, Results>;
+export type Fs = Client<FsOperation, FsResults>;

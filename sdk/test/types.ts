@@ -17,3 +17,19 @@ api.setPanel({ panel: { id: "test", title: "Test", elements: [{ type: "html", ht
 // @ts-expect-error Return types come from the Rust method list.
 const invalid: Promise<number> = api.readTerminal({ pane: 1 });
 void invalid;
+
+import { fs, path, Tree, type DirEntry } from "../src/index.js";
+const entries: Promise<DirEntry[]> = fs.readDir({ path: "/" });
+void entries;
+// @ts-expect-error Filesystem calls take named parameters.
+fs.readFile("/etc/hosts");
+const joined: string = path.join("/a", "b");
+void joined;
+const tree = new Tree<DirEntry>("files", {
+  roots: () => fs.readDir({ path: "/" }),
+  children: entry => fs.readDir({ path: entry.path }),
+  key: entry => entry.path,
+  label: entry => entry.name,
+  expandable: entry => entry.kind === "directory",
+});
+api.setPanel({ panel: { id: "files", title: "Files", placement: "left", elements: [tree.element()] } });

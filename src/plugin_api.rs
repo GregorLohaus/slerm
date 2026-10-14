@@ -8,29 +8,43 @@ pub const API_VERSION: u32 = 1;
 // Declare each method, its parameters and its result once. The enum drives Rust
 // dispatch; the generated result map drives the TypeScript client's signatures.
 macro_rules! plugin_api {
-    ($($variant:ident => $method:ident { $($(#[$attr:meta])* $arg:ident: $ty:ty),* } -> $result:ty;)+) => {
+    ($operation:ident, $results:ident; $($variant:ident => $method:ident { $($(#[$attr:meta])* $arg:ident: $ty:ty),* } -> $result:ty;)+) => {
         #[derive(Debug, Deserialize, TS)]
         #[serde(tag = "method", rename_all = "camelCase", deny_unknown_fields)]
-        pub enum Operation {
+        pub enum $operation {
             $($variant { $($(#[$attr])* $arg: $ty),* },)+
         }
         #[derive(TS)]
         #[allow(dead_code, non_snake_case)]
-        pub struct Results { $(pub $method: $result,)+ }
+        pub struct $results { $(pub $method: $result,)+ }
     };
 }
-plugin_api! {
+// Host operations run on the UI thread and can touch panes, tabs, and panels.
+plugin_api! { Operation, Results;
     GetState => getState {} -> State;
     Execute => execute { action: Action } -> ();
     FocusPane => focusPane { #[ts(type = "number")] pane: u64 } -> ();
     FocusTab => focusTab { #[ts(type = "number")] tab: u64 } -> ();
     ReadTerminal => readTerminal { #[ts(type = "number")] pane: u64 } -> String;
     WriteTerminal => writeTerminal { #[ts(type = "number")] pane: u64, text: String } -> ();
+    OpenTerminal => openTerminal { program: String, args: Vec<String>, cwd: String } -> PaneState;
     RegisterCommand => registerCommand { command: PluginCommand } -> ();
     UnregisterCommand => unregisterCommand { command: String } -> ();
     SetPanel => setPanel { panel: Panel } -> ();
     RemovePanel => removePanel { panel: String } -> ();
     ReportError => reportError { message: String } -> ();
+}
+
+// Filesystem operations run synchronously on the plugin's own worker thread, so
+// slow disks never stall rendering. Paths must be absolute.
+plugin_api! { FsOperation, FsResults;
+    ReadDir => readDir { path: String } -> Vec<DirEntry>;
+    Stat => stat { path: String } -> FileStat;
+    ReadFile => readFile { path: String } -> String;
+    WriteFile => writeFile { path: String, text: String } -> ();
+    CreateDir => createDir { path: String } -> ();
+    Remove => remove { path: String } -> ();
+    Rename => rename { from: String, to: String } -> ();
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
@@ -60,6 +74,35 @@ pub struct PaneState {
     pub title: String,
     pub floating: bool,
     pub exited: bool,
+    pub cwd: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum FileKind {
+    File,
+    Directory,
+    Other,
+}
+
+/// `kind` follows symlinks; `symlink` reports whether the entry itself is one.
+#[derive(Debug, Serialize, TS)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: FileKind,
+    pub symlink: bool,
+}
+
+#[derive(Debug, Serialize, TS)]
+pub struct FileStat {
+    pub kind: FileKind,
+    pub symlink: bool,
+    #[ts(type = "number")]
+    pub size: u64,
+    /// Milliseconds since the Unix epoch, when the platform reports it.
+    #[ts(type = "number | null")]
+    pub modified: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, TS)]
@@ -75,6 +118,28 @@ pub struct Panel {
     pub id: String,
     pub title: String,
     pub elements: Vec<Element>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub placement: Option<PanelPlacement>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum PanelPlacement {
+    Floating,
+    Left,
+    Right,
+}
+
+/// Visible rows in preorder. Plugins load children only when expanded.
+#[derive(Clone, Debug, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct TreeRow {
+    pub id: String,
+    pub label: String,
+    pub depth: usize,
+    pub expandable: bool,
+    pub expanded: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, TS)]
@@ -93,11 +158,32 @@ pub enum Element {
         value: String,
     },
     Separator,
+    Tree {
+        id: String,
+        rows: Vec<TreeRow>,
+        selected: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum UIEvent {
+    Select {
+        panel: String,
+        control: String,
+        item: String,
+    },
+    Activate {
+        panel: String,
+        control: String,
+        item: String,
+    },
+    Toggle {
+        panel: String,
+        control: String,
+        item: String,
+        expanded: bool,
+    },
     Click {
         panel: String,
         control: String,
@@ -131,8 +217,15 @@ pub fn typescript() -> String {
         State::decl(&config),
         TabState::decl(&config),
         PaneState::decl(&config),
+        FsOperation::decl(&config),
+        FsResults::decl(&config),
+        FileKind::decl(&config),
+        DirEntry::decl(&config),
+        FileStat::decl(&config),
         PluginCommand::decl(&config),
         Panel::decl(&config),
+        PanelPlacement::decl(&config),
+        TreeRow::decl(&config),
         Element::decl(&config),
         UIEvent::decl(&config),
         Event::decl(&config),
@@ -141,10 +234,12 @@ pub fn typescript() -> String {
         output.push_str(&declaration);
         output.push_str("\n\n");
     }
-    output.push_str(r#"type Params<M extends Operation["method"]> = Omit<Extract<Operation, { method: M }>, "method">;
-export type Slerm = {
-  [M in Operation["method"]]: (...args: keyof Params<M> extends never ? [] : [params: Params<M>]) => Promise<Results[M] extends null ? void : Results[M]>;
+    output.push_str(r#"type Params<O, M> = Omit<Extract<O, { method: M }>, "method">;
+type Client<O extends { method: string }, R extends Record<O["method"], unknown>> = {
+  [M in O["method"]]: (...args: keyof Params<O, M> extends never ? [] : [params: Params<O, M>]) => Promise<R[M] extends null ? void : R[M]>;
 };
+export type Slerm = Client<Operation, Results>;
+export type Fs = Client<FsOperation, FsResults>;
 "#);
     output
 }

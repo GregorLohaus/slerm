@@ -323,6 +323,9 @@ impl App {
                             floating: tab.floats.contains(id),
                             title: self.panes[id].terminal.title().unwrap_or("").into(),
                             exited: self.panes[id].dead,
+                            cwd: self.panes[id]
+                                .cwd()
+                                .and_then(|path| path.to_str().map(str::to_owned)),
                         })
                         .collect(),
                 })
@@ -339,6 +342,54 @@ impl App {
         use serde_json::json;
         match operation {
             Operation::GetState {} => return Ok(serde_json::to_value(self.plugin_state())?),
+            Operation::OpenTerminal { program, args, cwd } => {
+                ensure!(!self.tabs.is_empty(), "no active tab");
+                ensure!(
+                    self.panes.len() < self.config.multiplexer.max_panes,
+                    "Pane limit reached"
+                );
+                ensure!(
+                    !program.is_empty() && !program.contains('\0'),
+                    "invalid program"
+                );
+                ensure!(
+                    args.len() <= 256 && args.iter().all(|arg| !arg.contains('\0')),
+                    "invalid program arguments"
+                );
+                let cwd = std::path::Path::new(&cwd);
+                ensure!(
+                    cwd.is_absolute() && cwd.is_dir(),
+                    "working directory must be an existing absolute directory"
+                );
+                let mut config = self.config.clone();
+                config.shell = std::iter::once(program).chain(args).collect();
+                let pane = Pane::new(&config, &self.theme, ctx, Some(cwd))?;
+                let id = self.next_id;
+                self.next_id += 1;
+                self.panes.insert(id, pane);
+                let tab = &mut self.tabs[self.current];
+                let target = if tab.floats.contains(&tab.active) {
+                    tab.root.as_ref().map(Layout::first)
+                } else {
+                    Some(tab.active)
+                };
+                if let Some(root) = &mut tab.root {
+                    root.split(target.unwrap(), id, Axis::Horizontal);
+                } else {
+                    tab.root = Some(Layout::Pane(id));
+                }
+                tab.active = id;
+                tab.floats_visible = false;
+                tab.zoomed = false;
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("keys")));
+                return Ok(json!(crate::plugin_api::PaneState {
+                    id,
+                    title: String::new(),
+                    floating: false,
+                    exited: false,
+                    cwd: cwd.to_str().map(str::to_owned),
+                }));
+            }
             Operation::Execute { action } => {
                 ensure!(!self.tabs.is_empty(), "no active tab");
                 self.action(action, ctx)?;
@@ -457,6 +508,17 @@ impl App {
                 }
             }
         }
+        // Directory changes need polling even when the shell emits no OSC 7.
+        // Bound OS process-directory lookups rather than doing them each frame.
+        let now = std::time::Instant::now();
+        if let Some(next) = self.plugins.next_state_poll
+            && now < next
+        {
+            ctx.request_repaint_after(next - now);
+            return;
+        }
+        self.plugins.next_state_poll = Some(now + std::time::Duration::from_millis(250));
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
         let state = self.plugin_state();
         let serialized = serde_json::to_value(&state).unwrap();
         for plugin in &mut self.plugins.runtimes {
@@ -683,6 +745,9 @@ impl eframe::App for App {
                 });
             });
         }
+        for error in self.plugins.show_panels(ctx) {
+            self.error = Some(error);
+        }
         let bg = theme::color(self.theme.background);
         let tab = &mut self.tabs[self.current];
         let mut tiled = vec![];
@@ -748,9 +813,6 @@ impl eframe::App for App {
         }
         let active = tab.active;
         let active_visible = tab.is_visible(active);
-        for error in self.plugins.show_panels(ctx) {
-            self.error = Some(error);
-        }
         if let Some((index, command)) = plugin_command
             && let Err(e) = self.plugins.invoke(index, &command)
         {
