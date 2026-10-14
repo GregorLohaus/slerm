@@ -32,6 +32,8 @@ impl Pty {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "slerm");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        #[cfg(unix)]
+        configure_utf8_locale(&mut cmd);
         if let Some(dir) = cwd.or(config.working_directory.as_deref()) {
             cmd.cwd(dir);
         }
@@ -125,6 +127,138 @@ impl Pty {
             pixel_height: (rows as u32 * ch).min(u16::MAX as u32) as u16,
         })?;
         Ok(())
+    }
+}
+
+/// GUI launches may have no locale at all. In particular, macOS pbcopy then
+/// decodes Helix's UTF-8 bytes as a legacy encoding. Configure the child, not
+/// the multithreaded parent, and honor an existing, valid UTF-8 locale.
+#[cfg(unix)]
+fn configure_utf8_locale(cmd: &mut CommandBuilder) {
+    let effective = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .find_map(|key| cmd.get_env(key).filter(|value| !value.is_empty()));
+    if effective.is_some_and(locale_is_utf8) {
+        return;
+    }
+    let candidates = if cfg!(target_os = "macos") {
+        ["en_US.UTF-8", "C.UTF-8", "UTF-8"]
+    } else {
+        ["C.UTF-8", "en_US.UTF-8", "UTF-8"]
+    };
+    let Some(locale) = candidates
+        .into_iter()
+        .find(|name| locale_is_utf8(name.as_ref()))
+    else {
+        return;
+    };
+    if cmd.get_env("LANG").is_none_or(|value| value.is_empty()) {
+        cmd.env("LANG", locale);
+    }
+    cmd.env("LC_CTYPE", locale);
+    // LC_ALL overrides LC_CTYPE, including when it is C, POSIX or invalid.
+    if cmd.get_env("LC_ALL").is_some_and(|value| !value.is_empty()) {
+        cmd.env("LC_ALL", locale);
+    }
+}
+
+#[cfg(unix)]
+fn locale_is_utf8(name: &std::ffi::OsStr) -> bool {
+    use std::{
+        ffi::{CStr, CString},
+        os::unix::ffi::OsStrExt,
+    };
+
+    // libc does not expose this POSIX function on macOS yet.
+    unsafe extern "C" {
+        fn nl_langinfo_l(item: libc::nl_item, locale: libc::locale_t) -> *mut libc::c_char;
+    }
+
+    let Ok(name) = CString::new(name.as_bytes()) else {
+        return false;
+    };
+    // SAFETY: newlocale creates an independent locale object and does not
+    // change process-global state. Its codeset string lives until freelocale.
+    unsafe {
+        let locale = libc::newlocale(libc::LC_CTYPE_MASK, name.as_ptr(), std::ptr::null_mut());
+        if locale.is_null() {
+            return false;
+        }
+        let codeset = nl_langinfo_l(libc::CODESET, locale);
+        let utf8 =
+            !codeset.is_null() && matches!(CStr::from_ptr(codeset).to_bytes(), b"UTF-8" | b"UTF8");
+        libc::freelocale(locale);
+        utf8
+    }
+}
+
+#[cfg(all(test, unix))]
+mod locale_tests {
+    use super::*;
+
+    #[test]
+    fn gui_and_non_utf8_environments_get_a_working_utf8_locale() {
+        for vars in [
+            vec![],
+            vec![("LANG", "")],
+            vec![("LANG", "C")],
+            vec![("LC_ALL", "POSIX"), ("LANG", "en_US.UTF-8")],
+            vec![("LC_CTYPE", "C"), ("LANG", "en_US.UTF-8")],
+            vec![("LC_ALL", "slerm_missing.UTF-8")],
+        ] {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.env_clear();
+            for (key, value) in vars {
+                cmd.env(key, value);
+            }
+            cmd.env("LC_TIME", "C");
+            configure_utf8_locale(&mut cmd);
+            let effective = ["LC_ALL", "LC_CTYPE", "LANG"]
+                .into_iter()
+                .find_map(|key| cmd.get_env(key).filter(|value| !value.is_empty()))
+                .unwrap();
+            assert!(locale_is_utf8(effective), "{effective:?}");
+            assert_eq!(cmd.get_env("LC_TIME"), Some(std::ffi::OsStr::new("C")));
+            // Check the same native locale initialization that pbcopy uses,
+            // without changing the user's system clipboard in a test.
+            #[cfg(target_os = "macos")]
+            {
+                let output = std::process::Command::new("/usr/bin/locale")
+                    .arg("charmap")
+                    .env_clear()
+                    .envs(cmd.iter_full_env_as_str())
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "UTF-8");
+            }
+        }
+        assert!(!locale_is_utf8("slerm_missing.UTF-8".as_ref()));
+    }
+
+    #[test]
+    fn existing_utf8_locale_and_precedence_are_preserved() {
+        let mut base = CommandBuilder::new("/bin/sh");
+        base.env_clear();
+        configure_utf8_locale(&mut base);
+        let utf8 = base.get_env("LC_CTYPE").unwrap().to_owned();
+        for key in ["LANG", "LC_CTYPE", "LC_ALL"] {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.env_clear();
+            cmd.env("LANG", "C");
+            cmd.env(key, &utf8);
+            configure_utf8_locale(&mut cmd);
+            assert_eq!(cmd.get_env(key), Some(utf8.as_os_str()));
+            if key != "LC_CTYPE" {
+                assert!(cmd.get_env("LC_CTYPE").is_none());
+            }
+            if key != "LC_ALL" {
+                assert!(cmd.get_env("LC_ALL").is_none());
+            }
+            if key != "LANG" {
+                assert_eq!(cmd.get_env("LANG"), Some(std::ffi::OsStr::new("C")));
+            }
+        }
     }
 }
 

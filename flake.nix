@@ -146,6 +146,7 @@
               <key>CFBundleName</key><string>slerm</string>
               <key>CFBundleDisplayName</key><string>slerm</string>
               <key>CFBundleExecutable</key><string>slerm</string>
+              <key>CFBundleIconFile</key><string>slerm.icns</string>
               <key>CFBundleIdentifier</key><string>org.slerm.slerm</string>
               <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
               <key>CFBundlePackageType</key><string>APPL</string>
@@ -158,6 +159,7 @@
             </dict>
             </plist>
             EOF
+            cp ${./assets/slerm.icns} "$app/Contents/Resources/slerm.icns"
             mv "$out/bin/slerm" "$app/Contents/MacOS/slerm"
             ln -s "$app/Contents/MacOS/slerm" "$out/bin/slerm"
           '';
@@ -165,6 +167,28 @@
             GHOSTTY_SOURCE_DIR = "${ghostty-src}";
             GHOSTTY_ZIG_SYSTEM_DIR = "${ghosttyDeps}";
             LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast";
+          };
+          makeIcon = pkgs.writeShellApplication {
+            name = "slerm-make-icon";
+            runtimeInputs = [ pkgs.resvg ];
+            text = ''
+              if [ ! -f assets/slerm.svg ]; then
+                echo "Run nix run .#make-icon from the slerm repository root." >&2
+                exit 1
+              fi
+              mkdir -p target/slerm.iconset
+              resvg --width 1024 --height 1024 assets/slerm.svg assets/slerm.png
+              for size in 16 32 128 256 512; do
+                resvg --width "$size" --height "$size" assets/slerm.svg \
+                  "target/slerm.iconset/icon_''${size}x''${size}.png"
+                double=$((size * 2))
+                resvg --width "$double" --height "$double" assets/slerm.svg \
+                  "target/slerm.iconset/icon_''${size}x''${size}@2x.png"
+              done
+              # iconutil is part of macOS itself; resvg is supplied by Nix.
+              /usr/bin/iconutil -c icns target/slerm.iconset -o assets/slerm.icns
+              echo "Generated assets/slerm.png and assets/slerm.icns from assets/slerm.svg"
+            '';
           };
           slerm = pkgs.rustPlatform.buildRustPackage (
             {
@@ -177,6 +201,7 @@
                   ./Cargo.lock
                   ./config.example.toml
                   ./src
+                  ./assets
                   # Embedded runtime and the bindings checked by Rust tests.
                   ./sdk/runtime.js
                   ./sdk/src/generated.ts
@@ -240,7 +265,8 @@
           packages = {
             default = slerm;
             slerm = slerm;
-          };
+          }
+          // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin { make-icon = makeIcon; };
           devShells.default = pkgs.mkShell (
             {
               inputsFrom = [ slerm ];
@@ -267,13 +293,23 @@
     {
       packages = forAllSystems (system: perSystem.${system}.packages);
       devShells = forAllSystems (system: perSystem.${system}.devShells);
-      apps = forAllSystems (system: {
-        default = {
-          type = "app";
-          program = "${self.packages.${system}.default}/bin/slerm";
-          meta.description = "Run slerm";
-        };
-      });
+      apps = forAllSystems (
+        system:
+        {
+          default = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/slerm";
+            meta.description = "Run slerm";
+          };
+        }
+        // lib.optionalAttrs nixpkgs.legacyPackages.${system}.stdenv.hostPlatform.isDarwin {
+          make-icon = {
+            type = "app";
+            program = "${self.packages.${system}.make-icon}/bin/slerm-make-icon";
+            meta.description = "Regenerate slerm's macOS icons from the editable SVG";
+          };
+        }
+      );
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
     };
 }

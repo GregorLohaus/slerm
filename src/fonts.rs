@@ -185,6 +185,17 @@ fn load_from_database(config: &Config, mut db: Database) -> Result<FontDefinitio
         chain.extend(builtin.iter().cloned());
         fonts.families.insert(family(bold, italic), chain);
     }
+    // Pane headers and tab labels use the UI family, including arbitrary OSC
+    // title text. Keep its primary face for UI metrics, then try the same fonts
+    // as terminal text before falling back to the bundled symbol faces.
+    let terminal = fonts.families[&FontFamily::Monospace].clone();
+    let ui = fonts.families.get_mut(&FontFamily::Proportional).unwrap();
+    let bundled = ui.split_off(1);
+    for name in terminal.into_iter().chain(bundled) {
+        if !ui.contains(&name) {
+            ui.push(name);
+        }
+    }
     Ok(fonts)
 }
 
@@ -293,6 +304,20 @@ mod tests {
                 );
             }
         }
+        // OSC titles use proportional text in both pane headers and tab labels.
+        // Exercise egui's actual glyph lookup, not just the font's cmap.
+        let ctx = egui::Context::default();
+        ctx.set_fonts(fonts.clone());
+        let _ = ctx.run(Default::default(), |ctx| {
+            ctx.fonts_mut(|fonts| {
+                for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                    let font = egui::FontId::new(13.0, family);
+                    for c in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✓✔☑\u{f00c}".chars() {
+                        assert!(fonts.has_glyph(&font, c), "missing {c:?} in {font:?}");
+                    }
+                }
+            });
+        });
         let mut db = Database::new();
         let id = load_file(&mut db, config.font_path.as_ref().unwrap()).unwrap();
         let name = db.face(id).unwrap().families[0].0.clone();

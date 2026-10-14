@@ -265,32 +265,35 @@ impl App {
             if !tab.ids().contains(&id) {
                 continue;
             }
-            let was_floating = tab.floats.contains(&id);
+            let previous_order = tab.navigation_ids();
+            let closed_index = previous_order.iter().position(|pane| *pane == id);
             tab.detach(id);
             if tab.root.is_none() {
                 tab.floats_visible = true;
             }
             if tab.active == id {
-                if was_floating && !tab.floats.is_empty() {
-                    let nearest = tab
-                        .floats
-                        .iter()
-                        .map(|candidate| {
-                            let rect = self.panes[candidate].last_rect;
-                            let distance = closed_rect
-                                .filter(|_| rect.is_positive() && rect.is_finite())
-                                .map_or(f32::INFINITY, |source| {
-                                    source.center().distance_sq(rect.center())
-                                });
-                            (*candidate, distance)
-                        })
-                        .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-                    if let Some((next, _)) = nearest {
-                        tab.active = next;
-                        tab.floats_visible = true;
-                    }
-                } else if let Some(next) = tab.navigation_ids().first() {
-                    tab.active = *next;
+                let nearest = tab
+                    .navigation_ids()
+                    .into_iter()
+                    .map(|candidate| {
+                        let rect = self.panes[&candidate].last_rect;
+                        let distance = closed_rect
+                            .filter(|_| rect.is_positive() && rect.is_finite())
+                            .map_or(f32::INFINITY, |source| {
+                                source.center().distance_sq(rect.center())
+                            });
+                        let order_distance = closed_index
+                            .zip(previous_order.iter().position(|pane| *pane == candidate))
+                            .map_or(usize::MAX, |(closed, next)| closed.abs_diff(next));
+                        (candidate, distance, order_distance)
+                    })
+                    .min_by(|a, b| {
+                        a.1.total_cmp(&b.1)
+                            .then_with(|| a.2.cmp(&b.2))
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
+                if let Some((next, _, _)) = nearest {
+                    tab.active = next;
                 }
             }
         }
@@ -560,6 +563,10 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "macos")]
+        if let Some(error) = crate::macos::take_error() {
+            self.error = Some(error);
+        }
         if self.tabs.is_empty() {
             return;
         }
@@ -1716,6 +1723,47 @@ mod tests {
         app.action(Action::ClosePane, &ctx).unwrap();
         assert_eq!(app.tabs[0].active, 2);
         assert!(app.tabs[0].floats_visible);
+    }
+
+    #[test]
+    fn closing_tile_selects_nearest_visible_pane_and_preserves_other_focus() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        for _ in 0..3 {
+            app.action(Action::SplitDown, &ctx).unwrap();
+        }
+        app.action(Action::NewFloating, &ctx).unwrap();
+        app.action(Action::ToggleFloats, &ctx).unwrap();
+        app.tabs[0].active = 4;
+        // Pane 2 is closest, despite being neither the first nor the previous
+        // pane in traversal order. The hidden float overlaps the closing pane.
+        for (id, y) in [(1, 0.0), (2, 200.0), (3, 100.0), (4, 300.0), (5, 300.0)] {
+            app.panes.get_mut(&id).unwrap().last_rect =
+                Rect::from_min_size(egui::pos2(0.0, y), vec2(100.0, 100.0));
+        }
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 2);
+        assert!(!app.tabs[0].floats_visible);
+        app.close(1, &ctx);
+        assert_eq!(app.tabs[0].active, 2);
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 3);
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 5);
+        assert!(app.tabs[0].floats_visible);
+    }
+
+    #[test]
+    fn closing_unrendered_tile_selects_adjacent_pane() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        for _ in 0..3 {
+            app.action(Action::SplitDown, &ctx).unwrap();
+        }
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 3);
+        app.action(Action::ClosePane, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 2);
     }
 
     #[test]

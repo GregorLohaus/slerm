@@ -3,6 +3,8 @@ mod config;
 mod fonts;
 mod input;
 mod layout;
+#[cfg(target_os = "macos")]
+mod macos;
 mod pane;
 mod plugin_api;
 mod plugins;
@@ -106,7 +108,24 @@ fn main() -> Result<()> {
     eframe::run_native(
         "slerm",
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, config, path)?))),
+        Box::new(move |cc| {
+            #[cfg(target_os = "macos")]
+            let window_config = path.clone();
+            let app = app::App::new(cc, config, path)?;
+            #[cfg(target_os = "macos")]
+            macos::install(&cc.egui_ctx, move || {
+                // Independent windows keep running when their opener closes.
+                let mut child = std::process::Command::new(std::env::current_exe()?)
+                    .arg("--config")
+                    .arg(&window_config)
+                    .spawn()?;
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                Ok(())
+            })?;
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("Cannot start slerm: {e}"))
 }
