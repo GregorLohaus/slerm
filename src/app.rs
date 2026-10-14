@@ -451,13 +451,16 @@ impl App {
             Operation::UnregisterCommand { command } => {
                 self.plugins.runtimes[index].commands.remove(&command);
             }
-            Operation::SetPanel { panel } => {
+            Operation::SetPanel { mut panel } => {
                 panel.validate()?;
                 let panels = &mut self.plugins.runtimes[index].panels;
                 ensure!(
                     panels.contains_key(&panel.id) || panels.len() < 8,
                     "panel limit reached"
                 );
+                if let Some(previous) = panels.remove(&panel.id) {
+                    panel.keep_state(previous);
+                }
                 panels.insert(panel.id.clone(), panel);
             }
             Operation::RemovePanel { panel } => {
@@ -1177,6 +1180,64 @@ mod tests {
             })
             .unwrap();
         pump_plugins(&mut app, &ctx, |app| app.tabs[0].floats.len() == 1);
+
+        // The file tree reads the real filesystem through Boa and renders natively.
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        let pane = Pane::new(
+            &app.config,
+            &app.theme,
+            &ctx,
+            Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))),
+        )
+        .unwrap();
+        app.panes.insert(1, pane);
+        let (host, errors) = Host::start(
+            &[config::Plugin {
+                id: "files".into(),
+                path: "sdk/dist/filetree.js".into(),
+            }],
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &ctx,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        app.plugins = host;
+        let root = env!("CARGO_MANIFEST_DIR");
+        let has_node = |app: &App, id: &str| {
+            app.plugins.runtimes[0]
+                .panels
+                .get("files")
+                .is_some_and(|panel| {
+                    let mut found = false;
+                    crate::plugin_ui::visit_trees(&panel.elements, &mut |_, nodes| {
+                        let mut stack: Vec<_> = nodes.iter().collect();
+                        while let Some(node) = stack.pop() {
+                            found |= node.id == id;
+                            stack.extend(node.children.iter().flatten());
+                        }
+                    });
+                    found
+                })
+        };
+        let src = format!("{root}/src");
+        pump_plugins(&mut app, &ctx, |app| has_node(app, &src));
+        app.plugins.runtimes[0]
+            .send(Event::Ui {
+                data: crate::plugin_api::UIEvent::Toggle {
+                    panel: "files".into(),
+                    control: "tree".into(),
+                    item: src.clone(),
+                    expanded: true,
+                },
+            })
+            .unwrap();
+        pump_plugins(&mut app, &ctx, |app| {
+            has_node(app, &format!("{src}/plugin_ui.rs"))
+        });
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            assert!(app.plugins.show_panels(ctx).is_empty());
+        });
     }
 
     fn test_app(ctx: &egui::Context) -> App {

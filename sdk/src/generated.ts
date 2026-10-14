@@ -34,9 +34,13 @@ export type Panel = { id: string, title: string, elements: Array<Element>, place
 
 export type PanelPlacement = "floating" | "left" | "right";
 
-export type TreeRow = { id: string, label: string, depth: number, expandable: boolean, expanded: boolean, };
+export type TreeNode = { id: string, label: string, 
+/**
+ * A short glyph shown before the label, such as a Nerd Font icon.
+ */
+icon?: string, branch?: boolean, children?: Array<TreeNode>, };
 
-export type Element = { "type": "text", text: string, } | { "type": "button", id: string, label: string, } | { "type": "input", id: string, label: string, value: string, } | { "type": "separator" } | { "type": "tree", id: string, rows: Array<TreeRow>, selected: string | null, };
+export type Element = { "type": "text", text: string, } | { "type": "button", id: string, label: string, } | { "type": "input", id: string, label: string, value: string, } | { "type": "separator" } | { "type": "row", elements: Array<Element>, } | { "type": "tree", id: string, nodes: Array<TreeNode>, };
 
 export type UIEvent = { "kind": "select", panel: string, control: string, item: string, } | { "kind": "activate", panel: string, control: string, item: string, } | { "kind": "toggle", panel: string, control: string, item: string, expanded: boolean, } | { "kind": "click", panel: string, control: string, } | { "kind": "change", panel: string, control: string, value: string, };
 

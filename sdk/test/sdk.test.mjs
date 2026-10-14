@@ -90,58 +90,57 @@ test("file tree follows the active pane, loads folders lazily, and opens files",
   runInContext(readFileSync(new URL("../dist/filetree.js", import.meta.url), "utf8"), host.context);
   await settle();
   const panel = () => host.operations.findLast(op => op.method === "setPanel").panel;
-  const tree = () => panel().elements.find(e => e.type === "tree");
-  const row = label => tree().rows.find(row => row.label === label);
+  const text = () => panel().elements.filter(e => e.type === "text").map(e => e.text);
+  // Render loaded nodes as an indented outline; "+" marks an unloaded branch.
+  const outline = (nodes = panel().elements.at(-1).nodes, depth = 0) => nodes.flatMap(node => [
+    "  ".repeat(depth) + node.label + (node.branch && !node.children ? "+" : ""),
+    ...outline(node.children ?? [], depth + 1),
+  ]);
   const ui = data => { host.context.__slerm_dispatch({ event: "ui", data: { panel: "files", control: "tree", ...data } }); return settle(); };
+  const click = control => ui({ kind: "click", control });
 
   assert.equal(panel().placement, "left");
-  assert.deepEqual(tree().rows.map(r => [r.label, r.depth, r.expandable]), [["src", 0, true], ["README.md", 0, false]]);
+  assert.deepEqual(outline(), ["src+", "README.md"]);
   assert.deepEqual(reads, ["/project"]);
 
-  await ui({ kind: "toggle", item: row("src").id, expanded: true });
-  assert.deepEqual(tree().rows.map(r => r.label), ["src", "lib", "main.rs", "README.md"]);
-  await ui({ kind: "toggle", item: row("lib").id, expanded: true });
-  assert.equal(row("mod.rs").depth, 2);
-  assert.ok(row("src").id.length < 4, "row ids stay compact");
+  await ui({ kind: "toggle", item: "/project/src", expanded: true });
+  await ui({ kind: "toggle", item: "/project/src/lib", expanded: true });
+  assert.deepEqual(outline(), ["src", "  lib", "    mod.rs", "  main.rs", "README.md"]);
 
-  // Collapsing and reopening a parent restores expanded descendants.
-  await ui({ kind: "toggle", item: row("src").id, expanded: false });
-  assert.equal(row("mod.rs"), undefined);
-  await ui({ kind: "toggle", item: row("src").id, expanded: true });
-  assert.ok(row("mod.rs"));
-
+  // Collapsing and reopening needs no reload or panel update: the host owns expansion.
   const updates = host.operations.length;
-  await ui({ kind: "select", item: row("main.rs").id });
-  assert.equal(host.operations.length, updates, "selection needs no panel update");
-  await ui({ kind: "activate", item: row("main.rs").id });
-  assert.deepEqual(host.operations.at(-2), { method: "openTerminal", program: "hx", args: ["--", "/project/src/main.rs"], cwd: "/project" });
-  assert.equal(tree().selected, row("main.rs").id);
+  await ui({ kind: "toggle", item: "/project/src", expanded: false });
+  await ui({ kind: "toggle", item: "/project/src", expanded: true });
+  await ui({ kind: "select", item: "/project/src/main.rs" });
+  assert.equal(host.operations.length, updates);
+  assert.deepEqual(reads, ["/project", "/project/src", "/project/src/lib"]);
 
-  // Refresh keeps expansion; a folder that vanished collapses.
+  await ui({ kind: "activate", item: "/project/src/main.rs" });
+  assert.deepEqual(host.operations.at(-1), { method: "openTerminal", program: "hx", args: ["--", "/project/src/main.rs"], cwd: "/project" });
+
+  // Refresh reloads loaded folders; one that vanished drops out.
   delete files["/project/src/lib"];
   files["/project/src"] = ["main.rs"];
-  host.context.__slerm_dispatch({ event: "ui", data: { panel: "files", kind: "click", control: "refresh" } });
-  await settle();
-  assert.deepEqual(tree().rows.map(r => r.label), ["src", "main.rs", "README.md"]);
+  await click("refresh");
+  assert.deepEqual(outline(), ["src", "  main.rs", "README.md"]);
 
-  // Unreadable folders report an error and stay collapsed.
+  // Unreadable folders report an error.
   files["/project/src"] = ["main.rs", "locked"];
   files["/project/src/locked"] = [];
-  host.context.__slerm_dispatch({ event: "ui", data: { panel: "files", kind: "click", control: "refresh" } });
-  await settle();
+  await click("refresh");
   delete files["/project/src/locked"];
-  await ui({ kind: "toggle", item: row("locked").id, expanded: true });
-  assert.match(panel().elements[5].text, /Cannot read \/project\/src\/locked/);
-  assert.equal(row("locked").expanded, false);
+  await ui({ kind: "toggle", item: "/project/src/locked", expanded: true });
+  assert.match(text().at(-1), /Cannot read \/project\/src\/locked/);
+  assert.ok(outline().includes("  locked+"));
 
-  host.context.__slerm_dispatch({ event: "ui", data: { panel: "files", kind: "click", control: "up" } });
-  await settle();
-  assert.equal(panel().elements[0].text, "/");
+  await click("up");
+  assert.equal(text()[0], "/");
+  assert.deepEqual(panel().elements[0].elements.map(e => e.id), ["up", "refresh", "follow", "close"]);
 
   cwd = "/other";
   host.context.__slerm_dispatch({ event: "state", state: state() });
   await settle();
-  assert.equal(panel().elements[0].text, "/other");
-  assert.deepEqual(tree().rows.map(r => r.label), ["notes.txt"]);
+  assert.equal(text()[0], "/other");
+  assert.deepEqual(outline(), ["notes.txt"]);
   assert.deepEqual(host.errors, []);
 });

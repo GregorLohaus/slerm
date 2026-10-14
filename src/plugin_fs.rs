@@ -13,10 +13,7 @@ pub fn call(operation: FsOperation) -> Result<Value> {
         FsOperation::Stat { path } => json!(stat(absolute(&path)?)?),
         FsOperation::ReadFile { path } => {
             let path = absolute(&path)?;
-            ensure!(
-                fs::metadata(path)?.len() <= MAX_FILE,
-                "file exceeds 16 MiB"
-            );
+            ensure!(fs::metadata(path)?.len() <= MAX_FILE, "file exceeds 16 MiB");
             json!(fs::read_to_string(path).context("Cannot read file as UTF-8 text")?)
         }
         FsOperation::WriteFile { path, text } => {
@@ -47,7 +44,11 @@ pub fn call(operation: FsOperation) -> Result<Value> {
 // The worker's current directory is Slerm's, which means nothing to a plugin.
 fn absolute(path: &str) -> Result<&Path> {
     let path = Path::new(path);
-    ensure!(path.is_absolute(), "path must be absolute: {}", path.display());
+    ensure!(
+        path.is_absolute(),
+        "path must be absolute: {}",
+        path.display()
+    );
     Ok(path)
 }
 
@@ -140,7 +141,11 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(
             names,
-            [("link", "directory"), ("note.txt", "file"), ("sub", "directory")]
+            [
+                ("link", "directory"),
+                ("note.txt", "file"),
+                ("sub", "directory")
+            ]
         );
         // Removing a symlink to a directory removes only the link.
         #[cfg(unix)]

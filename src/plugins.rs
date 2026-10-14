@@ -1,7 +1,9 @@
 //! Embedded Boa runtimes, one worker thread per plugin. UI mutations stay on the UI thread.
 use crate::{
     config::Plugin,
-    plugin_api::{API_VERSION, Element, Event, Operation, Panel, PanelPlacement, PluginCommand},
+    plugin_api::{
+        API_VERSION, Element, Event, Operation, Panel, PanelPlacement, PluginCommand, TreeNode,
+    },
 };
 use anyhow::{Context as _, Result, ensure};
 use boa_engine::{
@@ -302,64 +304,80 @@ impl Panel {
             !self.title.trim().is_empty() && self.title.len() <= 200,
             "invalid panel title"
         );
-        ensure!(
-            self.elements.len() <= 128,
-            "a panel supports at most 128 elements"
-        );
         let mut ids = std::collections::HashSet::new();
-        let mut total_rows = 0;
-        for element in &self.elements {
-            if let Element::Tree { rows, selected, .. } = element {
-                total_rows += rows.len();
-                ensure!(
-                    total_rows <= 8192,
-                    "a panel supports at most 8192 tree rows"
-                );
-                let mut row_ids = std::collections::HashSet::new();
-                for (index, row) in rows.iter().enumerate() {
-                    ensure!(
-                        !row.id.is_empty() && row.id.len() <= 4096 && row_ids.insert(&row.id),
-                        "invalid or duplicate tree row id"
-                    );
-                    ensure!(
-                        row.label.len() <= 4096 && row.depth <= 32,
-                        "tree label or depth limit exceeded"
-                    );
-                    ensure!(
-                        !row.expanded || row.expandable,
-                        "only expandable rows can be expanded"
-                    );
-                    if index == 0 {
-                        ensure!(row.depth == 0, "first tree row must have depth zero");
-                    } else {
-                        let previous = &rows[index - 1];
-                        ensure!(row.depth <= previous.depth + 1, "tree depth skips a level");
-                        ensure!(
-                            row.depth <= previous.depth || previous.expanded,
-                            "children require an expanded parent"
-                        );
-                    }
-                }
-                ensure!(
-                    selected.as_ref().is_none_or(|id| row_ids.contains(id)),
-                    "selected tree row does not exist"
-                );
+        let mut count = 0;
+        validate_elements(&self.elements, 0, &mut count, &mut ids)?;
+        let mut nodes = 0;
+        let mut result = Ok(());
+        crate::plugin_ui::visit_trees(&self.elements, &mut |_, tree| {
+            let mut node_ids = std::collections::HashSet::new();
+            if result.is_ok() {
+                result = validate_nodes(tree, 0, &mut nodes, &mut node_ids);
             }
-            let id = match element {
-                Element::Button { id, .. }
-                | Element::Input { id, .. }
-                | Element::Tree { id, .. } => Some(id),
-                _ => None,
-            };
-            if let Some(id) = id {
-                ensure!(
-                    valid_id(id) && ids.insert(id),
-                    "invalid or duplicate control id"
-                );
-            }
-        }
-        Ok(())
+        });
+        result
     }
+}
+
+fn validate_elements<'a>(
+    elements: &'a [Element],
+    depth: usize,
+    count: &mut usize,
+    ids: &mut std::collections::HashSet<&'a str>,
+) -> Result<()> {
+    ensure!(depth <= 4, "rows nest at most 4 deep");
+    for element in elements {
+        *count += 1;
+        ensure!(*count <= 128, "a panel supports at most 128 elements");
+        let id = match element {
+            Element::Button { id, .. } | Element::Input { id, .. } | Element::Tree { id, .. } => {
+                Some(id)
+            }
+            Element::Row { elements } => {
+                validate_elements(elements, depth + 1, count, ids)?;
+                None
+            }
+            _ => None,
+        };
+        if let Some(id) = id {
+            ensure!(
+                valid_id(id) && ids.insert(id),
+                "invalid or duplicate control id"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_nodes<'a>(
+    nodes: &'a [TreeNode],
+    depth: usize,
+    count: &mut usize,
+    ids: &mut std::collections::HashSet<&'a str>,
+) -> Result<()> {
+    ensure!(depth < 64, "tree nodes nest at most 64 deep");
+    for node in nodes {
+        *count += 1;
+        ensure!(
+            *count <= 16_384,
+            "a panel supports at most 16384 tree nodes"
+        );
+        ensure!(
+            !node.id.is_empty() && node.id.len() <= 4096 && ids.insert(&node.id),
+            "invalid or duplicate tree node id"
+        );
+        ensure!(node.label.len() <= 4096, "tree label exceeds 4096 bytes");
+        ensure!(
+            node.icon
+                .as_ref()
+                .is_none_or(|icon| icon.chars().count() <= 4),
+            "tree icons are at most 4 characters"
+        );
+        if let Some(children) = &node.children {
+            validate_nodes(children, depth + 1, count, ids)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -419,7 +437,9 @@ impl Host {
                             .default_width(260.0)
                             .width_range(160.0..=600.0)
                             .show(ctx, |ui| {
-                                ui.heading(&panel.title);
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new(&panel.title).strong());
+                                ui.separator();
                                 crate::plugin_ui::show(ui, panel, &mut events);
                             });
                     }
@@ -457,6 +477,46 @@ mod tests {
             ]}))
             .unwrap();
         assert!(panel.validate().is_err());
+    }
+
+    #[test]
+    fn validates_nested_rows_and_tree_nodes() {
+        let panel = |elements| {
+            serde_json::from_value::<Panel>(json!({"id":"p", "title":"P", "elements": elements}))
+                .unwrap()
+        };
+        let node = |id: &str, children| json!({"id": id, "label": id, "children": children});
+        assert!(
+            panel(json!([
+                {"type":"row", "elements":[{"type":"button", "id":"a", "label":"A"}]},
+                {"type":"tree", "id":"t", "nodes":[node("x", json!([node("y", json!([]))]))]}
+            ]))
+            .validate()
+            .is_ok()
+        );
+        // Control IDs are unique across nested rows; node IDs within a tree.
+        assert!(
+            panel(json!([
+                {"type":"row", "elements":[{"type":"button", "id":"a", "label":"A"}]},
+                {"type":"button", "id":"a", "label":"B"}
+            ]))
+            .validate()
+            .is_err()
+        );
+        assert!(
+            panel(json!([{"type":"tree", "id":"t", "nodes":[node("x", json!([node("x", json!([]))]))]}]))
+                .validate()
+                .is_err()
+        );
+        let mut deep = json!([]);
+        for depth in 0..70 {
+            deep = json!([node(&depth.to_string(), deep)]);
+        }
+        assert!(
+            panel(json!([{"type":"tree", "id":"t", "nodes": deep}]))
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

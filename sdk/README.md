@@ -93,9 +93,24 @@ incompatible changes; Slerm rejects bundles built for another API version.
 | `focusPane({ pane })`, `focusTab({ tab })` | Focus by ID from `getState()` |
 | `readTerminal({ pane })` | Read a plain-text screen and scrollback snapshot, up to 128 KiB |
 | `writeTerminal({ pane, text })` | Send raw PTY input; include `\r` to submit a shell command |
+| `openTerminal({ program, args, cwd })` | Split the active pane and run a program in a new pane |
 | `registerCommand({ command })`, `unregisterCommand({ command })` | Manage entries in the Plugins menu |
 | `setPanel({ panel })`, `removePanel({ panel })` | Create, replace, or remove a native panel |
 | `reportError({ message })` | Display an error in Slerm |
+
+## Filesystem
+
+`import { fs } from "@slerm/plugin-sdk"` gives filesystem access. Like the API
+above, its methods are generated from Rust (`FsOperation` in `plugin_api.rs`),
+but they run on the plugin's own worker thread instead of the UI thread. Paths
+must be absolute; `PaneState.cwd` gives each pane's working directory.
+
+| Method | Purpose |
+| --- | --- |
+| `readDir({ path })` | List entries (`name`, `path`, `kind`, `symlink`), sorted by name |
+| `stat({ path })` | `kind`, `symlink`, `size`, and `modified` in epoch milliseconds |
+| `readFile({ path })`, `writeFile({ path, text })` | Read or write UTF-8 text, up to 16 MiB |
+| `createDir({ path })`, `remove({ path })`, `rename({ from, to })` | Create directories recursively; remove files or whole directories |
 
 Command and panel IDs are scoped to the plugin. Control IDs must be unique within
 a panel. Pane and tab IDs come from Slerm and should be treated as opaque numbers.
@@ -105,24 +120,38 @@ Events are discriminated by `event.event`:
 - `command`: `event.command` is the selected command ID.
 - `state`: `event.state` is a snapshot when workspace metadata changes. Terminal
   output changes alone do not produce this event; use `readTerminal` for snapshots.
-- `ui`: `event.data` contains the panel/control IDs and either a `click`, or a
-  `change` with the new input `value`.
+- `ui`: `event.data` contains the panel/control IDs and a `kind`: `click`
+  (button), `change` (input, with `value`), or `select`, `toggle` (with
+  `expanded`), and `activate` for tree nodes (with the node ID as `item`).
 
 ## Native UI
 
-`setPanel` renders an egui floating window. Its `elements` accept `text`, `button`,
-`input`, and `separator` variants. Inputs retain edits until replaced by another
-`setPanel` call. UI focus receives typing without forwarding it to the terminal.
-See [`examples/workspace.ts`](examples/workspace.ts) for a complete example.
+`setPanel` renders a floating window, or a resizable sidebar with
+`placement: "left"` or `"right"`. Its `elements` accept `text`, `button`,
+`input`, `separator`, `row` (lays out nested elements horizontally), and `tree`.
+Inputs retain edits until replaced by another `setPanel` call. UI focus receives
+typing without forwarding it to the terminal.
+
+A `tree` takes nested `nodes`, each with an `id`, a `label`, an optional `icon`
+glyph (Nerd Font icons work when the terminal font has them), and `children`.
+Slerm owns expansion and selection, keyed by node ID, so they survive updates and
+need no round trip. A node with `branch: true` and no `children` is unloaded:
+expanding it sends a `toggle` event, and the plugin sends the panel again with
+its children. Double-clicking or pressing Enter on a leaf sends `activate`.
+
+See [`examples/workspace.ts`](examples/workspace.ts) and
+[`examples/filetree.ts`](examples/filetree.ts), a file browser sidebar that
+follows the active pane's directory and opens files in `hx`.
 
 ## Runtime boundaries
 
-The runtime supports ECMAScript and promises. This initial host does not expose
-Node.js APIs, a DOM, filesystem/network APIs, or timers. Bundle imports ahead of
+The runtime supports ECMAScript and promises. Besides `fs`, the host does not
+expose Node.js APIs, a DOM, network APIs, or timers. Bundle imports ahead of
 time and use libraries compatible with this environment. Report diagnostics with
 `reportError`; `console` is not installed.
 
-Plugins are trusted local extensions: terminal writes can run shell commands.
+Plugins are trusted local extensions: terminal writes can run shell commands, and
+`fs` can read and write any file the user can.
 Boa contexts run in the same OS process as Slerm; worker threads and execution
 limits are not an OS security sandbox. Slerm bounds loops, recursion, promise jobs,
 request waits, bundle/message sizes, and UI counts. An uncaught callback error

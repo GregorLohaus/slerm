@@ -121,6 +121,10 @@ pub struct Panel {
     #[serde(default)]
     #[ts(optional)]
     pub placement: Option<PanelPlacement>,
+    /// Expansion and selection belong to the host and survive panel updates.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub trees: std::collections::HashMap<String, crate::plugin_ui::TreeState>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, TS)]
@@ -131,15 +135,31 @@ pub enum PanelPlacement {
     Right,
 }
 
-/// Visible rows in preorder. Plugins load children only when expanded.
+/// A node in a `tree` element. A node with `children` or `branch: true` can
+/// expand. Expanding emits a `toggle` event, so a plugin can send children
+/// that load on demand. Node IDs must be unique within the tree and stable
+/// across updates: Slerm keeps expansion and selection by ID.
 #[derive(Clone, Debug, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct TreeRow {
+pub struct TreeNode {
     pub id: String,
     pub label: String,
-    pub depth: usize,
-    pub expandable: bool,
-    pub expanded: bool,
+    /// A short glyph shown before the label, such as a Nerd Font icon.
+    #[serde(default)]
+    #[ts(optional)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub branch: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub children: Option<Vec<TreeNode>>,
+}
+
+impl TreeNode {
+    pub fn is_branch(&self) -> bool {
+        self.branch.unwrap_or(false) || self.children.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, TS)]
@@ -158,10 +178,13 @@ pub enum Element {
         value: String,
     },
     Separator,
+    /// Lays out its elements horizontally.
+    Row {
+        elements: Vec<Element>,
+    },
     Tree {
         id: String,
-        rows: Vec<TreeRow>,
-        selected: Option<String>,
+        nodes: Vec<TreeNode>,
     },
 }
 
@@ -225,7 +248,7 @@ pub fn typescript() -> String {
         PluginCommand::decl(&config),
         Panel::decl(&config),
         PanelPlacement::decl(&config),
-        TreeRow::decl(&config),
+        TreeNode::decl(&config),
         Element::decl(&config),
         UIEvent::decl(&config),
         Event::decl(&config),

@@ -1,8 +1,6 @@
 import { apiVersion } from "./generated.js";
 import type { Event, Fs, Slerm } from "./generated.js";
 export * from "./generated.js";
-export { path } from "./path.js";
-export { Tree, type TreeElement, type TreeEvent, type TreeSource } from "./tree.js";
 
 export interface Plugin {
   activate?(slerm: Slerm): void | Promise<void>;
