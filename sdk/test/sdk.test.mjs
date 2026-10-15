@@ -298,3 +298,72 @@ test("git panel lists changes, stages files, commits, and refreshes on a timer",
   assert.equal(host.timers.size, 1, "closing clears the interval without new timers");
   assert.deepEqual(host.errors, []);
 });
+
+test("hacker news reader fetches feeds, threads comments into a tree, and opens links", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const story = (id, title, extra = {}) => ({ objectID: id, title, url: `https://example.com/${id}`, author: "pg", points: 100, num_comments: 2, created_at_i: now - 7200, story_text: null, ...extra });
+  const feeds = {
+    "search?tags=front_page&hitsPerPage=50": [story("1", "Rust in production"), story("2", "Ask HN: Terminals?", { url: null, story_text: "<p>Which one?" })],
+    "search_by_date?tags=story&hitsPerPage=50": [story("3", "Brand new")],
+  };
+  const thread = { children: [
+    { id: 10, author: "alice", text: "Great &amp; fast<p>Second paragraph", created_at_i: now - 60, children: [
+      { id: 11, author: "bob", text: "It&#x27;s <i>really</i> fast", created_at_i: now - 30, children: [] },
+    ] },
+    { id: 12, author: null, text: null, created_at_i: now, children: [] },
+  ] };
+  const requests = [];
+  const system = op => {
+    if (op.method === "run") { requests.push(`${op.program} ${op.args.join(" ")}`); return { result: { status: 0, stdout: "", stderr: "", timedOut: false } }; }
+    assert.equal(op.method, "fetch");
+    const path = op.url.replace("https://hn.algolia.com/api/v1/", "");
+    requests.push(path);
+    const body = path === "items/1" ? thread : { hits: feeds[path] };
+    return { result: { status: 200, headers: {}, body: JSON.stringify(body) } };
+  };
+  const host = start(undefined, undefined, system);
+  runInContext(readFileSync(new URL("../dist/hackernews.js", import.meta.url), "utf8"), host.context);
+  await settle();
+  assert.deepEqual(requests, [], "nothing loads until opened");
+  host.context.__slerm_dispatch({ event: "command", command: "toggle-hn" });
+  await settle();
+  const panel = () => host.operations.findLast(op => op.method === "setPanel").panel;
+  const all = elements => elements.flatMap(e => [e, ...all(e.elements ?? [])]);
+  const find = id => all(panel().elements).find(e => e.id === id);
+  const texts = () => all(panel().elements).filter(e => e.type === "text").map(e => e.text);
+  const ui = data => { host.context.__slerm_dispatch({ event: "ui", data: { panel: "hn", ...data } }); return settle(); };
+
+  assert.deepEqual(host.operations.at(-1), { method: "focusPanel", panel: "hn", control: "stories" });
+  assert.deepEqual(find("stories").rows.map(row => row.cells), [["100", "2", "2h", "Rust in production"], ["100", "2", "2h", "Ask HN: Terminals?"]]);
+  assert.equal(find("stories").selected, "1");
+  assert.ok(texts().includes("100 points by pg · 2h ago · example.com"));
+  assert.equal(host.timers.size, 1, "auto-refresh is scheduled");
+
+  await ui({ kind: "select", control: "stories", item: "2" });
+  assert.ok(texts().includes("Which one?"));
+  assert.ok(texts().some(t => t.endsWith("news.ycombinator.com")));
+  await ui({ kind: "key", control: "stories", key: "J" });
+  assert.deepEqual(host.operations.at(-1), { method: "navigate", panel: "hn", control: "stories", to: "next" });
+
+  await ui({ kind: "activate", control: "stories", item: "1" });
+  assert.equal(requests.at(-1), "items/1");
+  assert.deepEqual(host.operations.at(-1), { method: "focusPanel", panel: "hn", control: "thread" });
+  const tree = find("thread").nodes;
+  assert.deepEqual(tree.map(node => node.label), ["alice (1) · Great & fast"]);
+  assert.equal(tree[0].children[0].label, "bob · It's really fast");
+
+  await ui({ kind: "select", control: "thread", item: "10" });
+  assert.equal(find("reader").value, "alice · 1m ago\n\nGreat & fast\n\nSecond paragraph");
+  assert.ok(all(panel().elements).findIndex(e => e.id === "reader") < all(panel().elements).findIndex(e => e.id === "thread"));
+
+  await ui({ kind: "key", control: "thread", key: "B" });
+  assert.equal(requests.at(-1), "open https://example.com/1");
+  await ui({ kind: "key", control: "stories", key: "F" });
+  assert.equal(requests.at(-1), "search_by_date?tags=story&hitsPerPage=50");
+  assert.deepEqual(find("stories").rows.map(row => row.cells[3]), ["Brand new"]);
+  assert.equal(find("feed").value, "Newest");
+
+  await ui({ kind: "key", control: "stories", key: "Q" });
+  assert.equal(host.operations.at(-1).method, "removePanel");
+  assert.deepEqual(host.errors, []);
+});

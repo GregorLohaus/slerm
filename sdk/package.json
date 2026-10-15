@@ -18,7 +18,7 @@
     "generate": "cargo run --manifest-path ../Cargo.toml -- --generate-plugin-sdk",
     "build": "tsc -p tsconfig.json",
     "check": "npm run build && tsc -p tsconfig.examples.json",
-    "example": "npm run check && esbuild examples/panes.ts examples/filetree.ts examples/git.ts --bundle --format=iife --platform=neutral --target=es2022 --outdir=dist",
+    "example": "npm run check && esbuild examples/panes.ts examples/filetree.ts examples/git.ts examples/hackernews.ts --bundle --format=iife --platform=neutral --target=es2022 --outdir=dist",
     "test": "npm run example && node --test test/*.test.mjs",
     "prepack": "npm run build"
   },

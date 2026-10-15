@@ -308,6 +308,10 @@ pub enum Element {
         #[serde(default)]
         #[ts(optional)]
         readonly: Option<bool>,
+        /// Stay scrolled to the end as text grows, as for logs.
+        #[serde(default)]
+        #[ts(optional)]
+        follow: Option<bool>,
     },
     /// Emits `check`.
     Checkbox {

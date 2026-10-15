@@ -81,7 +81,11 @@ rows?: number,
 /**
  * Monospace text, as in a code editor.
  */
-code?: boolean, readonly?: boolean, } | { "type": "checkbox", id: string, label: string, checked: boolean, } | { "type": "slider", id: string, label?: string, value: number, min: number, max: number, step?: number, } | { "type": "select", id: string, label?: string, value: string, options: Array<string>, } | { "type": "progress", value: number, text?: string, } | { "type": "spinner" } | { "type": "separator" } | { "type": "row", elements: Array<Element>, } | { "type": "section", id: string, title: string, 
+code?: boolean, readonly?: boolean, 
+/**
+ * Stay scrolled to the end as text grows, as for logs.
+ */
+follow?: boolean, } | { "type": "checkbox", id: string, label: string, checked: boolean, } | { "type": "slider", id: string, label?: string, value: number, min: number, max: number, step?: number, } | { "type": "select", id: string, label?: string, value: string, options: Array<string>, } | { "type": "progress", value: number, text?: string, } | { "type": "spinner" } | { "type": "separator" } | { "type": "row", elements: Array<Element>, } | { "type": "section", id: string, title: string, 
 /**
  * Whether the section starts open; defaults to true.
  */

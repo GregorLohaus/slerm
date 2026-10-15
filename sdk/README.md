@@ -177,7 +177,7 @@ Events are discriminated by `event.event`:
 | `text` | A label, with optional `style` (`heading`, `strong`, `weak`, `small`, `monospace`) and theme `color` (`accent`, `warning`, `error`) | |
 | `button` | A push button | `click` |
 | `input` | A single-line text field | `change` |
-| `textArea` | Multi-line text; `code` for monospace, `readonly` for output that sticks to the bottom | `change` |
+| `textArea` | Multi-line text; `code` for monospace, `readonly`, and `follow` to stay scrolled to the end like a log | `change` |
 | `checkbox` | An on/off toggle | `check` |
 | `slider` | A number between `min` and `max`, with an optional `step` | `number` on release |
 | `select` | A dropdown of `options` | `change` |
@@ -224,7 +224,9 @@ See [`examples/panes.ts`](examples/panes.ts);
 [`examples/filetree.ts`](examples/filetree.ts), a file browser sidebar that
 follows the active pane's directory and opens files in `hx`; and
 [`examples/git.ts`](examples/git.ts), a git sidebar that refreshes on a timer,
-stages files, commits, and opens diffs.
+stages files, commits, and opens diffs; and
+[`examples/hackernews.ts`](examples/hackernews.ts), a Hacker News reader that
+fetches feeds and shows comment threads as a tree.
 
 ## Runtime boundaries
 

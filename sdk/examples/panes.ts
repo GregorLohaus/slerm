@@ -41,7 +41,7 @@ async function show(api: Slerm) {
         { type: "slider", id: "lines", label: "lines", value: lines, min: 5, max: 200, step: 5 },
         { type: "button", id: "refresh", label: "Refresh" },
       ] },
-      { type: "textArea", id: "preview", value: preview, rows: 12, code: true, readonly: true },
+      { type: "textArea", id: "preview", value: preview, rows: 12, code: true, readonly: true, follow: true },
     ] },
     { type: "section", id: "send-section", title: "Send", open: false, elements: [
       { type: "textArea", id: "commands", value: commands, rows: 4, code: true },

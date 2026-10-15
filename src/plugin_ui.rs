@@ -281,6 +281,7 @@ fn show_elements(ui: &mut Ui, cx: &mut Cx, elements: &mut [Element]) {
                 rows,
                 code,
                 readonly,
+                follow,
             } => {
                 let rows = rows.unwrap_or(6) as usize;
                 let code = code.unwrap_or(false);
@@ -306,8 +307,7 @@ fn show_elements(ui: &mut Ui, cx: &mut Cx, elements: &mut [Element]) {
                 let changed = egui::ScrollArea::vertical()
                     .id_salt(id.as_str())
                     .max_height(max_height)
-                    // Read-only areas usually show logs or terminal output.
-                    .stick_to_bottom(readonly)
+                    .stick_to_bottom(follow.unwrap_or(false))
                     .show(ui, |ui| {
                         if readonly {
                             ui.add(edit(&mut value.as_str(), id, rows, code));
