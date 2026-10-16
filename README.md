@@ -108,11 +108,12 @@ the PNG and ICNS; see [`assets/README.md`](assets/README.md).
 
 ## Releases
 
-Pushing a tag like `v0.1.0` (matching the version in `Cargo.toml`) runs
+Every push to `main` runs
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the
-macOS app on GitHub Actions and attaches a zip and its SHA-256 checksum to a new
-GitHub Release. The workflow can also be started manually to produce a downloadable
-build artifact without publishing a release.
+macOS app on GitHub Actions and uploads it as a build artifact. If no release exists
+yet for the `version` in `Cargo.toml`, it also publishes `v<version>` on GitHub
+Releases with the zip and its SHA-256 checksum. To cut a new release, bump the version
+and push to `main`; no tag is needed, so it works with a Gitea-to-GitHub mirror.
 
 ## License
 
