@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      # libghostty-vt-sys builds Ghostty from source, which needs Zig 0.15.2+.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Bundle slerm.app
+        run: scripts/bundle-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slerm-macos
+          path: target/bundle/slerm-*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" target/bundle/slerm-* \
+            --title "slerm ${GITHUB_REF_NAME#v}" --generate-notes

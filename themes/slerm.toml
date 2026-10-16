@@ -1,0 +1,164 @@
+# The slerm theme, for Helix: the colors of `DEFAULT` in src/theme.rs, so an
+# editor running inside slerm looks like the terminal around it.
+#
+# Install with:  ln -s "$PWD/themes/slerm.toml" ~/.config/helix/themes/slerm.toml
+# then set       theme = "slerm"   in ~/.config/helix/config.toml.
+
+# Editor chrome.
+"ui.background" = { bg = "background" }
+"ui.text" = "foreground"
+"ui.text.focus" = { fg = "foreground", bg = "chrome_active" }
+"ui.text.inactive" = "bright_black"
+"ui.text.directory" = "blue"
+
+"ui.cursor" = { fg = "background", bg = "accent" }
+"ui.cursor.primary" = { fg = "background", bg = "accent" }
+"ui.cursor.match" = { fg = "accent", modifiers = ["bold", "underlined"] }
+"ui.cursor.insert" = { fg = "background", bg = "green" }
+"ui.cursor.select" = { fg = "background", bg = "magenta" }
+
+"ui.selection" = { bg = "selection" }
+"ui.selection.primary" = { bg = "selection" }
+
+"ui.linenr" = "bright_black"
+"ui.linenr.selected" = { fg = "accent", modifiers = ["bold"] }
+"ui.gutter" = { bg = "background" }
+"ui.gutter.selected" = { bg = "background" }
+
+"ui.cursorline.primary" = { bg = "chrome" }
+"ui.cursorcolumn.primary" = { bg = "chrome" }
+
+"ui.statusline" = { fg = "chrome_fg", bg = "chrome" }
+"ui.statusline.inactive" = { fg = "bright_black", bg = "chrome" }
+"ui.statusline.normal" = { fg = "background", bg = "accent", modifiers = ["bold"] }
+"ui.statusline.insert" = { fg = "background", bg = "green", modifiers = ["bold"] }
+"ui.statusline.select" = { fg = "background", bg = "magenta", modifiers = ["bold"] }
+
+"ui.bufferline" = { fg = "chrome_fg", bg = "chrome" }
+"ui.bufferline.active" = { fg = "accent", bg = "chrome_active", modifiers = ["bold"] }
+"ui.bufferline.background" = { bg = "chrome" }
+
+"ui.popup" = { bg = "chrome" }
+"ui.popup.info" = { fg = "chrome_fg", bg = "chrome" }
+"ui.window" = { fg = "border" }
+"ui.help" = { fg = "chrome_fg", bg = "chrome" }
+"ui.menu" = { fg = "chrome_fg", bg = "chrome" }
+"ui.menu.selected" = { fg = "foreground", bg = "selection" }
+"ui.menu.scroll" = { fg = "bright_black", bg = "chrome" }
+
+"ui.virtual.ruler" = { bg = "chrome" }
+"ui.virtual.whitespace" = "border"
+"ui.virtual.indent-guide" = "border"
+"ui.virtual.inlay-hint" = { fg = "bright_black", modifiers = ["italic"] }
+"ui.virtual.jump-label" = { fg = "accent", modifiers = ["bold", "underlined"] }
+"ui.virtual.wrap" = "border"
+
+"ui.highlight" = { bg = "chrome_active" }
+"ui.debug.breakpoint" = "red"
+"ui.debug.active" = "yellow"
+
+# Syntax.
+"comment" = { fg = "bright_black", modifiers = ["italic"] }
+
+"keyword" = "magenta"
+"keyword.control.exception" = "red"
+"keyword.directive" = "bright_magenta"
+"operator" = "cyan"
+"punctuation" = "chrome_fg"
+"punctuation.special" = "cyan"
+
+"function" = "blue"
+"function.macro" = "bright_magenta"
+"function.builtin" = "bright_blue"
+"constructor" = "blue"
+"special" = "bright_blue"
+"label" = "cyan"
+"namespace" = "bright_magenta"
+
+"type" = "yellow"
+"type.builtin" = "bright_yellow"
+"type.enum.variant" = "magenta"
+"attribute" = "yellow"
+
+"variable" = "foreground"
+"variable.builtin" = "red"
+"variable.parameter" = { fg = "foreground", modifiers = ["italic"] }
+"variable.other.member" = "green"
+
+"constant" = "magenta"
+"constant.builtin" = "bright_magenta"
+"constant.numeric" = "yellow"
+"constant.character.escape" = "cyan"
+
+"string" = "green"
+"string.regexp" = "cyan"
+"string.special" = "cyan"
+
+"tag" = "red"
+
+# Markup.
+"markup.heading" = { fg = "yellow", modifiers = ["bold"] }
+"markup.list" = "red"
+"markup.list.unchecked" = "red"
+"markup.list.checked" = "green"
+"markup.bold" = { modifiers = ["bold"] }
+"markup.italic" = { modifiers = ["italic"] }
+"markup.strikethrough" = { modifiers = ["crossed_out"] }
+"markup.link.url" = { fg = "blue", modifiers = ["underlined"] }
+"markup.link.text" = "magenta"
+"markup.link.label" = "cyan"
+"markup.quote" = { fg = "cyan", modifiers = ["italic"] }
+"markup.raw" = "green"
+
+# Diffs and version control.
+"diff.plus" = "green"
+"diff.plus.gutter" = "green"
+"diff.minus" = "red"
+"diff.minus.gutter" = "red"
+"diff.delta" = "blue"
+"diff.delta.gutter" = "blue"
+"diff.delta.moved" = "magenta"
+
+# Diagnostics.
+"error" = "red"
+"warning" = "yellow"
+"info" = "blue"
+"hint" = "green"
+"diagnostic" = { modifiers = ["underlined"] }
+"diagnostic.error" = { underline = { color = "red", style = "curl" } }
+"diagnostic.warning" = { underline = { color = "yellow", style = "curl" } }
+"diagnostic.info" = { underline = { color = "blue", style = "curl" } }
+"diagnostic.hint" = { underline = { color = "green", style = "curl" } }
+"diagnostic.unnecessary" = { modifiers = ["dim"] }
+"diagnostic.deprecated" = { modifiers = ["crossed_out"] }
+
+[palette]
+# The terminal grid.
+background = "#17191c"
+foreground = "#e2e4e8"
+accent = "#58c4ad"
+selection = "#2f3d44"
+
+# The chrome around the grid.
+chrome = "#1f2124"
+chrome_fg = "#a8adb5"
+chrome_active = "#2b2e33"
+border = "#363636"
+
+# The sixteen ANSI colors.
+black = "#1d1f21"
+red = "#cc6666"
+green = "#b5bd68"
+yellow = "#f0c674"
+blue = "#81a2be"
+magenta = "#b294bb"
+cyan = "#8abeb7"
+white = "#c5c8c6"
+bright_black = "#666666"
+bright_red = "#d54e53"
+bright_green = "#b9ca4a"
+bright_yellow = "#e7c547"
+bright_blue = "#7aa6da"
+bright_magenta = "#c397d8"
+bright_cyan = "#70c0b1"
+bright_white = "#eaeaea"

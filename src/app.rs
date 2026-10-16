@@ -664,6 +664,15 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
+        {
+            static ICON: std::sync::Once = std::sync::Once::new();
+            ICON.call_once(|| {
+                if let Err(e) = crate::macos::apply_icon() {
+                    self.error = Some(format!("{e:#}"));
+                }
+            });
+        }
+        #[cfg(target_os = "macos")]
         if let Some(error) = crate::macos::take_error() {
             self.error = Some(error);
         }

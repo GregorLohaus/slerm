@@ -124,12 +124,19 @@ pub fn install(
     file.setSubmenu(Some(&file_menu));
     menubar.insertItem_atIndex(&file, 1);
 
-    // Also give cargo-run/unbundled launches an icon. Finder uses the ICNS
-    // resource declared by the bundle's Info.plist instead.
+    Ok(())
+}
+
+/// Set the Dock icon. Winit finishes launching after the app-creation
+/// callback and can replace an icon set earlier, so call this from a frame.
+/// Also covers cargo-run and symlinked launches, where AppKit finds no bundle
+/// ICNS.
+pub fn apply_icon() -> Result<()> {
+    let mtm = MainThreadMarker::new().context("macOS icons require the main thread")?;
     let data = NSData::with_bytes(include_bytes!("../assets/slerm.png"));
     let icon = NSImage::initWithData(NSImage::alloc(), &data).context("Cannot decode app icon")?;
     unsafe {
-        app.setApplicationIconImage(Some(&icon));
+        NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&icon));
     }
     Ok(())
 }
