@@ -27,8 +27,12 @@ const listings = new Map<string, DirEntry[]>();
 // Expanded folders by path, kept across roots so switching panes and tabs
 // restores them. The host owns expansion while a node stays in the tree.
 const expanded = new Set<string>();
-// The tree node under the cursor. The host drops its selection when the node
-// leaves the tree, so this is only trusted for nodes under the root.
+// The root folder is the tree's top node. Its ID has a prefix so it is new
+// whenever the root changes, even to a folder the tree already showed, and
+// roots are expanded unless folded.
+const ROOT = "root:";
+const folded = new Set<string>();
+// The node under the cursor, restored when the panel is shown again.
 let selected: string | undefined;
 let follow = true;
 let shown = false;
@@ -88,7 +92,8 @@ function nodes(dir: string, budget: { left: number }): TreeNode[] {
 async function show(api: Slerm) {
   if (!shown) return;
   const budget = { left: MAX_NODES };
-  const tree = root ? nodes(root, budget) : [];
+  const tree: TreeNode[] = root ? [{ id: ROOT + root, label: root.slice(root.lastIndexOf("/") + 1) || "/",
+    icon: FOLDER, branch: true, expanded: !folded.has(root), children: nodes(root, budget) }] : [];
   const status = error || (budget.left < 0 ? "Too many files to show. Collapse or refresh folders." : "");
   const elements: Element[] = [
     { type: "row", elements: [
@@ -102,7 +107,7 @@ async function show(api: Slerm) {
   if (status) elements.push({ type: "text", text: status });
   elements.push(
     { type: "text", text: "j/k move · h fold/up · l expand · o open · gg/G ends · r refresh · q close", style: "small" },
-    { type: "tree", id: "tree", nodes: tree },
+    { type: "tree", id: "tree", nodes: tree, selected },
   );
   await api.setPanel({ panel: { id: "files", title: "Files", placement: "left", keys: KEYS, elements } });
 }
@@ -114,8 +119,8 @@ async function hide(api: Slerm) {
 
 async function up() {
   if (!root || root === "/") return;
-  // Show the folder we came from expanded in its parent.
-  expanded.add(root);
+  // Select the folder we came from in its parent.
+  selected = root;
   await open(root.slice(0, root.lastIndexOf("/")) || "/");
 }
 
@@ -189,13 +194,21 @@ definePlugin({
           }
           if (data.key === "Q") return await hide(api);
           if (data.key === "R") await refresh();
-          if (data.key === "H" && root && selected?.startsWith(root.endsWith("/") ? root : `${root}/`) && expanded.has(selected)) {
-            // Fold the expanded folder under the cursor; the toggle event updates `expanded`.
-            return await api.navigate({ panel: "files", control: "tree", to: "left" });
+          if (data.key === "H") {
+            // Fold an expanded folder or jump to the parent folder's node. Only
+            // a folded root changes the root.
+            if (!root || selected !== ROOT + root || !folded.has(root)) {
+              return await api.navigate({ panel: "files", control: "tree", to: "left" });
+            }
+            await up();
           }
-          if (data.key === "H" || data.key === "Minus") await up();
+          if (data.key === "Minus") await up();
         } else if (data.kind === "select") {
           selected = data.item;
+          return;
+        } else if (data.kind === "toggle" && data.item.startsWith(ROOT)) {
+          const dir = data.item.slice(ROOT.length);
+          if (data.expanded) folded.delete(dir); else folded.add(dir);
           return;
         } else if (data.kind === "toggle") {
           if (!data.expanded) {

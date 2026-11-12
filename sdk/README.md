@@ -221,6 +221,8 @@ need no round trip. A node with `branch: true` and no `children` is unloaded:
 expanding it sends a `toggle` event, and the plugin sends the panel again with
 its children. A branch with `expanded: true` starts expanded when its ID first
 appears, so a plugin can restore folders it remembers from `toggle` events.
+The tree's own `selected` picks a node while the host has no selection, as
+when the panel is shown again, so a plugin can restore it from `select` events.
 Double-clicking or pressing Enter on a leaf sends `activate`.
 
 See [`examples/panes.ts`](examples/panes.ts);

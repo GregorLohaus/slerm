@@ -27,6 +27,41 @@ pub enum Layout {
     },
 }
 
+/// The rectangle nearest `source` in `direction`: aligned ones first, then the
+/// nearest center, without wrapping. Ties go to the earliest.
+pub fn nearest(direction: Direction, source: Rect, rects: &[Rect]) -> Option<usize> {
+    if !source.is_positive() || !source.is_finite() {
+        return None;
+    }
+    let horizontal = matches!(direction, Direction::Left | Direction::Right);
+    let sign = if matches!(direction, Direction::Left | Direction::Up) {
+        -1.0
+    } else {
+        1.0
+    };
+    rects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rect)| {
+            if !rect.is_positive() || !rect.is_finite() {
+                return None;
+            }
+            let delta = rect.center() - source.center();
+            let forward = sign * if horizontal { delta.x } else { delta.y };
+            if forward <= 0.5 {
+                return None;
+            }
+            let overlap = if horizontal {
+                source.bottom().min(rect.bottom()) - source.top().max(rect.top())
+            } else {
+                source.right().min(rect.right()) - source.left().max(rect.left())
+            };
+            Some((index, overlap <= 0.0, delta.length_sq()))
+        })
+        .min_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.total_cmp(&b.2)))
+        .map(|(index, _, _)| index)
+}
+
 impl Layout {
     pub fn split(&mut self, target: PaneId, new: PaneId, axis: Axis) -> bool {
         match self {
@@ -223,62 +258,34 @@ impl Tab {
         }
     }
 
-    pub fn focus_direction(&mut self, direction: Direction, rects: &[(PaneId, Rect)]) {
+    /// Move to the nearest visible pane in `direction`. Returns whether there was one.
+    pub fn focus_direction(&mut self, direction: Direction, rects: &[(PaneId, Rect)]) -> bool {
         if self.floats_visible
             && !self.floats.is_empty()
             && matches!(direction, Direction::Down | Direction::Up)
         {
             self.cycle(matches!(direction, Direction::Up));
-            return;
+            return true;
         }
         let Some((_, source)) = rects
             .iter()
             .find(|(id, _)| *id == self.active && self.is_visible(*id))
         else {
-            return;
-        };
-        if !source.is_positive() || !source.is_finite() {
-            return;
-        }
-        let horizontal = matches!(direction, Direction::Left | Direction::Right);
-        let sign = if matches!(direction, Direction::Left | Direction::Up) {
-            -1.0
-        } else {
-            1.0
+            return false;
         };
         let ids = self.navigation_ids();
-        let next = rects
+        let mut candidates: Vec<_> = rects
             .iter()
-            .filter_map(|(id, rect)| {
-                if *id == self.active
-                    || !ids.contains(id)
-                    || !self.is_visible(*id)
-                    || !rect.is_positive()
-                    || !rect.is_finite()
-                {
-                    return None;
-                }
-                let delta = rect.center() - source.center();
-                let forward = sign * if horizontal { delta.x } else { delta.y };
-                if forward <= 0.5 {
-                    return None;
-                }
-                let overlap = if horizontal {
-                    source.bottom().min(rect.bottom()) - source.top().max(rect.top())
-                } else {
-                    source.right().min(rect.right()) - source.left().max(rect.left())
-                };
-                // Prefer aligned neighbors, then the nearest center, without wrapping.
-                Some((*id, overlap <= 0.0, delta.length_sq()))
-            })
-            .min_by(|a, b| {
-                a.1.cmp(&b.1)
-                    .then_with(|| a.2.total_cmp(&b.2))
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-        if let Some((id, _, _)) = next {
-            self.active = id;
-        }
+            .filter(|(id, _)| *id != self.active && ids.contains(id) && self.is_visible(*id))
+            .copied()
+            .collect();
+        candidates.sort_by_key(|(id, _)| *id);
+        let boxes: Vec<_> = candidates.iter().map(|(_, rect)| *rect).collect();
+        let Some(index) = nearest(direction, *source, &boxes) else {
+            return false;
+        };
+        self.active = candidates[index].0;
+        true
     }
     pub fn cycle(&mut self, backwards: bool) {
         let ids = self.navigation_ids();

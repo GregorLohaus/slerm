@@ -65,6 +65,10 @@ pub struct Multiplexer {
     pub floating_height: f32,
     pub floating_max_width: f32,
     pub floating_max_height: f32,
+    /// Corner radius of pane borders in points; 0 for square corners.
+    pub corner_radius: u8,
+    /// Title bars on tiled panes. Floating panes keep theirs to be moved by.
+    pub title_bars: bool,
 }
 
 /// What a `[keys]` entry runs: a built-in action, or `plugin:<id>/<command>`.
@@ -149,6 +153,8 @@ impl Default for Multiplexer {
             // far more than a scratch terminal needs, so cap them in points too.
             floating_max_width: 960.0,
             floating_max_height: 640.0,
+            corner_radius: crate::theme::CORNER_RADIUS,
+            title_bars: true,
         }
     }
 }
@@ -438,6 +444,7 @@ mod tests {
             "[keys]\n'Alt+B' = 'plugin:files/show files'",
             "[keys]\n'Alt+B' = 'plugin:missing/show-files'",
             "[multiplexer]\nfloating_width = 2",
+            "[multiplexer]\ncorner_radius = -1",
         ] {
             assert!(Config::parse(text).is_err(), "accepted {text}");
         }

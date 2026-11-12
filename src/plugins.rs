@@ -654,18 +654,20 @@ impl Host {
                 let id = egui::Id::new(("plugin panel", &plugin.id, &panel.id));
                 match panel.placement.unwrap_or(PanelPlacement::Floating) {
                     PanelPlacement::Floating => {
-                        egui::Window::new(&panel.title)
+                        panel.rect = egui::Window::new(&panel.title)
                             .id(id)
                             .order(egui::Order::Foreground)
                             .default_size(egui::vec2(280.0, 420.0))
-                            .show(ctx, |ui| crate::plugin_ui::show(ui, panel, &mut events));
+                            .show(ctx, |ui| crate::plugin_ui::show(ui, panel, &mut events))
+                            .map(|shown| shown.response.rect);
                     }
                     placement => {
                         let side = match placement {
                             PanelPlacement::Left => egui::SidePanel::left(id),
                             _ => egui::SidePanel::right(id),
                         };
-                        side.resizable(true)
+                        let shown = side
+                            .resizable(true)
                             .default_width(260.0)
                             .width_range(160.0..=600.0)
                             .show(ctx, |ui| {
@@ -674,6 +676,7 @@ impl Host {
                                 ui.separator();
                                 crate::plugin_ui::show(ui, panel, &mut events);
                             });
+                        panel.rect = Some(shown.response.rect);
                     }
                 }
             }

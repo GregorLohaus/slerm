@@ -3,7 +3,7 @@ use crate::{
     input,
     layout::{Axis, Direction, Layout, PaneId, Tab},
     pane::{self, Pane},
-    plugin_api::{Event, Operation, PaneState, State, TabState},
+    plugin_api::{Event, Operation, PaneState, PanelPlacement, State, TabState},
     plugins::{self, Host},
     theme::{self, Theme},
 };
@@ -123,6 +123,131 @@ impl App {
         Ok(())
     }
 
+    /// Plugin panels in navigation order. Visible floating panes keep focus to
+    /// themselves, as they do for tiled panes.
+    fn navigable_panels(&self) -> Vec<Target> {
+        let tab = &self.tabs[self.current];
+        if tab.floats_visible && !tab.floats.is_empty() {
+            return vec![];
+        }
+        let mut panels = vec![];
+        for (index, plugin) in self.plugins.runtimes.iter().enumerate() {
+            let mut ids: Vec<_> = plugin.panels.keys().cloned().collect();
+            ids.sort();
+            panels.extend(ids.into_iter().map(|id| Target::Panel(index, id)));
+        }
+        panels
+    }
+
+    fn panel(&self, index: usize, id: &str) -> Option<&crate::plugin_api::Panel> {
+        self.plugins.runtimes.get(index)?.panels.get(id)
+    }
+
+    /// The panel whose list or text field had keyboard focus in the last frame.
+    fn focused_panel(&self) -> Option<Target> {
+        self.navigable_panels().into_iter().find(|target| {
+            let Target::Panel(index, id) = target else {
+                return false;
+            };
+            self.panel(*index, id)
+                .is_some_and(|panel| panel.focused.is_some() || panel.editing.is_some())
+        })
+    }
+
+    fn rect(&self, target: &Target) -> Option<Rect> {
+        match target {
+            Target::Pane(id) => self.panes.get(id).map(|pane| pane.last_rect),
+            Target::Panel(index, id) => {
+                let panel = self.panel(*index, id)?;
+                // Floating panels overlap the panes, so only docked ones have a direction.
+                panel
+                    .placement
+                    .is_some_and(|placement| !matches!(placement, PanelPlacement::Floating))
+                    .then_some(panel.rect?)
+            }
+        }
+    }
+
+    fn focus(&mut self, target: Target, ctx: &egui::Context) {
+        match target {
+            Target::Pane(id) => {
+                self.tabs[self.current].active = id;
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("keys")));
+            }
+            Target::Panel(index, id) => {
+                if let Some(panel) = self.plugins.runtimes[index].panels.get_mut(&id) {
+                    panel.focus_request = Some(None);
+                }
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    fn focus_direction(&mut self, direction: Direction, ctx: &egui::Context) {
+        let panels = self.navigable_panels();
+        let from = self.focused_panel();
+        let tab = &mut self.tabs[self.current];
+        if from.is_none() {
+            let rects = self
+                .panes
+                .iter()
+                .map(|(id, pane)| (*id, pane.last_rect))
+                .collect::<Vec<_>>();
+            if tab.focus_direction(direction, &rects) {
+                return;
+            }
+        }
+        // Past the outermost pane, or from a panel, panels join the panes.
+        let source = from.clone().unwrap_or(Target::Pane(tab.active));
+        let mut targets = vec![];
+        if from.is_some() {
+            let ids = if tab.zoomed {
+                vec![tab.active]
+            } else {
+                tab.navigation_ids()
+            };
+            targets.extend(ids.into_iter().map(Target::Pane));
+        }
+        targets.extend(
+            panels
+                .into_iter()
+                .filter(|panel| Some(panel) != from.as_ref()),
+        );
+        let (targets, rects): (Vec<_>, Vec<_>) = targets
+            .into_iter()
+            .filter_map(|target| Some((self.rect(&target)?, target)))
+            .map(|(rect, target)| (target, rect))
+            .unzip();
+        if let Some(source) = self.rect(&source)
+            && let Some(index) = crate::layout::nearest(direction, source, &rects)
+        {
+            self.focus(targets[index].clone(), ctx);
+        }
+    }
+
+    /// Next or previous pane, then the plugin panels, wrapping around.
+    fn cycle_focus(&mut self, backwards: bool, ctx: &egui::Context) {
+        let panels = self.navigable_panels();
+        if panels.is_empty() {
+            self.tabs[self.current].cycle(backwards);
+            return;
+        }
+        let current = self
+            .focused_panel()
+            .unwrap_or(Target::Pane(self.tabs[self.current].active));
+        let mut targets: Vec<_> = self.tabs[self.current]
+            .navigation_ids()
+            .into_iter()
+            .map(Target::Pane)
+            .collect();
+        targets.extend(panels);
+        let next = match targets.iter().position(|target| *target == current) {
+            Some(pos) => (pos + if backwards { targets.len() - 1 } else { 1 }) % targets.len(),
+            None => 0,
+        };
+        self.focus(targets[next].clone(), ctx);
+    }
+
     fn action(&mut self, action: Action, ctx: &egui::Context) -> Result<()> {
         let active = self.tabs[self.current].active;
         match action {
@@ -201,15 +326,10 @@ impl App {
                     Action::FocusUp => Direction::Up,
                     _ => Direction::Right,
                 };
-                let rects = self
-                    .panes
-                    .iter()
-                    .map(|(id, pane)| (*id, pane.last_rect))
-                    .collect::<Vec<_>>();
-                self.tabs[self.current].focus_direction(direction, &rects);
+                self.focus_direction(direction, ctx);
             }
             Action::NextPane | Action::PreviousPane => {
-                self.tabs[self.current].cycle(action == Action::PreviousPane)
+                self.cycle_focus(action == Action::PreviousPane, ctx)
             }
             Action::ClosePane => self.close(active, ctx),
             Action::ZoomPane => {
@@ -835,7 +955,11 @@ impl eframe::App for App {
                     if !tab.zoomed {
                         pane.last_rect = *rect;
                     }
-                    if show_pane(ui, *id, pane, *rect, &self.config, &self.theme, active) {
+                    let chrome = Chrome {
+                        active,
+                        title: self.config.multiplexer.title_bars,
+                    };
+                    if show_pane(ui, *id, pane, *rect, &self.config, &self.theme, chrome) {
                         tab.active = *id;
                     }
                 }
@@ -863,7 +987,12 @@ impl eframe::App for App {
                     let rect = ui.available_rect_before_wrap();
                     ui.allocate_rect(rect, egui::Sense::hover());
                     pane.last_rect = rect;
-                    if show_pane(ui, id, pane, rect, &self.config, &self.theme, active) {
+                    // Floating panes keep their title bar: it is how they are moved.
+                    let chrome = Chrome {
+                        active,
+                        title: true,
+                    };
+                    if show_pane(ui, id, pane, rect, &self.config, &self.theme, chrome) {
                         tab.active = id;
                     }
                 });
@@ -907,6 +1036,14 @@ impl eframe::App for App {
     }
 }
 
+/// Something that keyboard focus can move to.
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    Pane(PaneId),
+    /// A plugin panel, by runtime index and panel ID.
+    Panel(usize, String),
+}
+
 /// Parks keyboard focus on a widget that never exists, with every navigation key
 /// filtered out. Otherwise egui spends Tab, the arrows and Escape on moving focus
 /// between the tab bar and the menu buttons instead of leaving them for the shell.
@@ -931,8 +1068,12 @@ fn grab_keys(ctx: &egui::Context) {
     });
 }
 
-/// Corner rounding shared by a pane's border and its title bar.
-const CORNER: u8 = theme::CORNER_RADIUS;
+/// How a pane is drawn.
+#[derive(Clone, Copy)]
+struct Chrome {
+    active: bool,
+    title: bool,
+}
 
 fn show_pane(
     ui: &mut egui::Ui,
@@ -941,44 +1082,53 @@ fn show_pane(
     rect: Rect,
     config: &Config,
     theme: &Theme,
-    active: bool,
+    Chrome { active, title }: Chrome,
 ) -> bool {
+    // Corner rounding shared by a pane's border and its title bar.
+    let corner = config.multiplexer.corner_radius;
     let accent = theme::color(theme.accent);
-    let title_rect = Rect::from_min_size(rect.min, vec2(rect.width(), 25.0_f32.min(rect.height())));
-    // The title bar only rounds off the top of the pane, unless the pane is so
-    // short that the bar is all there is of it.
-    let bottom = if title_rect.height() < rect.height() {
-        0
+    let height = if title {
+        25.0_f32.min(rect.height())
     } else {
-        CORNER
+        0.0
     };
-    ui.painter().rect_filled(
-        title_rect,
-        CornerRadius {
-            nw: CORNER,
-            ne: CORNER,
-            sw: bottom,
-            se: bottom,
-        },
-        theme::color(if active {
-            theme.chrome_active_bg
+    let title_rect = Rect::from_min_size(rect.min, vec2(rect.width(), height));
+    if title {
+        // The title bar only rounds off the top of the pane, unless the pane is
+        // so short that the bar is all there is of it.
+        let bottom = if title_rect.height() < rect.height() {
+            0
         } else {
-            theme.chrome_bg
-        }),
-    );
-    ui.painter()
-        .with_clip_rect(title_rect.shrink(3.0).intersect(ui.clip_rect()))
-        .text(
-            title_rect.min + vec2(7.0, 4.0),
-            egui::Align2::LEFT_TOP,
-            pane_title(id, pane),
-            egui::FontId::proportional(13.0),
-            if active {
-                accent
-            } else {
-                theme::color(theme.chrome_fg)
+            corner
+        };
+        ui.painter().rect_filled(
+            title_rect,
+            CornerRadius {
+                nw: corner,
+                ne: corner,
+                sw: bottom,
+                se: bottom,
             },
+            theme::color(if active {
+                theme.chrome_active_bg
+            } else {
+                theme.chrome_bg
+            }),
         );
+        ui.painter()
+            .with_clip_rect(title_rect.shrink(3.0).intersect(ui.clip_rect()))
+            .text(
+                title_rect.min + vec2(7.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                pane_title(id, pane),
+                egui::FontId::proportional(13.0),
+                if active {
+                    accent
+                } else {
+                    theme::color(theme.chrome_fg)
+                },
+            );
+    }
     // Click-only leaves dragging to the floating window's existing move handler.
     let header = ui.interact(
         title_rect,
@@ -1014,7 +1164,7 @@ fn show_pane(
     }
     ui.painter().rect_stroke(
         rect,
-        CORNER,
+        corner,
         Stroke::new(
             if hovering_files {
                 2.0
@@ -1150,6 +1300,109 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "plugin timed out");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn pane_navigation_reaches_plugin_panels() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        let path = std::env::temp_dir().join(format!("slerm-panels-{}.js", std::process::id()));
+        std::fs::write(&path, r#"
+            __slerm.activate({
+                async activate(api) {
+                    for (const placement of ["left", "right", "floating"]) {
+                        await api.setPanel({panel:{id:placement, title:placement, placement, elements:[]}});
+                    }
+                    await api.registerCommand({command:{id:'ready', title:'Ready'}});
+                }
+            }, 1);
+        "#).unwrap();
+        let (host, errors) = Host::start(
+            &[config::Plugin {
+                id: "test".into(),
+                path: path.clone(),
+            }],
+            std::path::Path::new("."),
+            &Default::default(),
+            &ctx,
+        );
+        std::fs::remove_file(path).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        app.plugins = host;
+        pump_plugins(&mut app, &ctx, |app| {
+            app.plugins.runtimes[0].commands.contains_key("ready")
+        });
+        let second = app.spawn(&ctx).unwrap();
+        app.tabs[0]
+            .root
+            .as_mut()
+            .unwrap()
+            .split(1, second, Axis::Horizontal);
+        let rect = |x: f32, width: f32| Rect::from_min_size(egui::pos2(x, 0.0), vec2(width, 100.0));
+        app.panes.get_mut(&1).unwrap().last_rect = rect(100.0, 100.0);
+        app.panes.get_mut(&second).unwrap().last_rect = rect(200.0, 100.0);
+        let panels = &mut app.plugins.runtimes[0].panels;
+        panels.get_mut("left").unwrap().rect = Some(rect(0.0, 100.0));
+        panels.get_mut("right").unwrap().rect = Some(rect(300.0, 100.0));
+        panels.get_mut("floating").unwrap().rect = Some(rect(150.0, 100.0));
+        let requested = |app: &App| {
+            let mut ids: Vec<_> = app.plugins.runtimes[0]
+                .panels
+                .iter()
+                .filter(|(_, panel)| panel.focus_request.is_some())
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.sort();
+            ids
+        };
+        // Stand in for a frame: the requested panel takes focus, the others lose it.
+        let settle = |app: &mut App| {
+            for panel in app.plugins.runtimes[0].panels.values_mut() {
+                panel.focused = panel.focus_request.take().map(|_| "list".into());
+            }
+        };
+
+        // Panes come first; the floating panel has no direction.
+        app.tabs[0].active = second;
+        app.action(Action::FocusLeft, &ctx).unwrap();
+        assert_eq!(app.tabs[0].active, 1);
+        assert!(requested(&app).is_empty());
+        app.action(Action::FocusLeft, &ctx).unwrap();
+        assert_eq!(requested(&app), ["left"]);
+        settle(&mut app);
+        app.action(Action::FocusLeft, &ctx).unwrap();
+        assert!(requested(&app).is_empty(), "no wrapping");
+        app.action(Action::FocusRight, &ctx).unwrap();
+        assert!(requested(&app).is_empty());
+        assert_eq!(app.tabs[0].active, 1);
+        settle(&mut app);
+        app.tabs[0].active = second;
+        app.action(Action::FocusRight, &ctx).unwrap();
+        assert_eq!(requested(&app), ["right"]);
+        settle(&mut app);
+
+        // Cycling visits the panes, then every panel, sorted by ID.
+        app.action(Action::NextPane, &ctx).unwrap();
+        assert!(requested(&app).is_empty());
+        assert_eq!(app.tabs[0].active, 1);
+        settle(&mut app);
+        app.action(Action::PreviousPane, &ctx).unwrap();
+        assert_eq!(requested(&app), ["right"]);
+        settle(&mut app);
+        app.action(Action::PreviousPane, &ctx).unwrap();
+        assert_eq!(requested(&app), ["left"]);
+        settle(&mut app);
+        app.action(Action::PreviousPane, &ctx).unwrap();
+        assert_eq!(requested(&app), ["floating"]);
+        settle(&mut app);
+        app.action(Action::PreviousPane, &ctx).unwrap();
+        assert!(requested(&app).is_empty());
+        assert_eq!(app.tabs[0].active, second);
+
+        // Visible floating panes keep navigation to themselves.
+        app.action(Action::NewFloating, &ctx).unwrap();
+        app.action(Action::NextPane, &ctx).unwrap();
+        assert!(requested(&app).is_empty());
     }
 
     #[test]
@@ -1558,7 +1811,10 @@ mod tests {
                             screen,
                             &app.config,
                             &app.theme,
-                            true,
+                            Chrome {
+                                active: true,
+                                title: true,
+                            },
                         ) {
                             focused.push(1);
                         }
@@ -1575,7 +1831,10 @@ mod tests {
                                 float,
                                 &app.config,
                                 &app.theme,
-                                false,
+                                Chrome {
+                                    active: false,
+                                    title: true,
+                                },
                             ) {
                                 focused.push(2);
                             }
@@ -1632,7 +1891,10 @@ mod tests {
                             rect,
                             &app.config,
                             &app.theme,
-                            true,
+                            Chrome {
+                                active: true,
+                                title: true,
+                            },
                         );
                     })
                     .unwrap();

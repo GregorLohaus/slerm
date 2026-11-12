@@ -98,7 +98,12 @@ follow?: boolean, } | { "type": "checkbox", id: string, label: string, checked: 
 /**
  * Whether the section starts open; defaults to true.
  */
-open?: boolean, elements: Array<Element>, } | { "type": "table", id: string, columns: Array<string>, rows: Array<TableRow>, selected?: string, } | { "type": "tree", id: string, nodes: Array<TreeNode>, };
+open?: boolean, elements: Array<Element>, } | { "type": "table", id: string, columns: Array<string>, rows: Array<TableRow>, selected?: string, } | { "type": "tree", id: string, nodes: Array<TreeNode>, 
+/**
+ * A node to select and scroll to while the tree has no selection, such
+ * as when the panel is shown again or the selected node left the tree.
+ */
+selected?: string, };
 
 export type UIEvent = { "kind": "select", panel: string, control: string, item: string, } | { "kind": "activate", panel: string, control: string, item: string, } | { "kind": "toggle", panel: string, control: string, item: string, expanded: boolean, } | { "kind": "click", panel: string, control: string, } | { "kind": "check", panel: string, control: string, checked: boolean, } | { "kind": "number", panel: string, control: string, value: number, } | { "kind": "key", panel: string, control: string, key: string, } | { "kind": "change", panel: string, control: string, value: string, };
 

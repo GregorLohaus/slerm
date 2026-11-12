@@ -32,7 +32,7 @@ impl Panel {
     pub fn keep_state(&mut self, mut previous: Panel) {
         let mut lists = HashMap::new();
         walk(&self.elements, &mut |element| match element {
-            Element::Tree { id, nodes } => {
+            Element::Tree { id, nodes, .. } => {
                 if let Some(mut state) = previous.lists.remove(id) {
                     let mut ids = HashSet::new();
                     collect_ids(nodes, &mut ids);
@@ -52,6 +52,7 @@ impl Panel {
         self.expand_new_branches(Some(&previous));
         self.focused = previous.focused;
         self.focus_request = previous.focus_request;
+        self.rect = previous.rect;
         // An update built before the plugin saw the latest keystrokes would
         // otherwise overwrite them.
         if let Some(id) = previous.editing
@@ -66,10 +67,19 @@ impl Panel {
 
 impl Panel {
     /// Expand branches marked `expanded` that the previous panel's tree of the
-    /// same ID did not contain, or every marked branch of a new panel.
+    /// same ID did not contain, or every marked branch of a new panel, and
+    /// apply a tree's `selected` while it has no selection.
     pub fn expand_new_branches(&mut self, previous: Option<&Panel>) {
         let lists = &mut self.lists;
-        visit_trees(&self.elements, &mut |tree, nodes| {
+        walk(&self.elements, &mut |element| {
+            let Element::Tree {
+                id: tree,
+                nodes,
+                selected,
+            } = element
+            else {
+                return;
+            };
             let mut old = HashSet::new();
             if let Some(previous) = previous {
                 visit_trees(&previous.elements, &mut |id, nodes| {
@@ -78,8 +88,18 @@ impl Panel {
                     }
                 });
             }
-            let state = lists.entry(tree.to_owned()).or_default();
+            let state = lists.entry(tree.clone()).or_default();
             mark_expanded(nodes, &old, &mut state.expanded);
+            if state.selected.is_none()
+                && let Some(selected) = selected
+            {
+                let mut ids = HashSet::new();
+                collect_ids(nodes, &mut ids);
+                if ids.contains(selected.as_str()) {
+                    state.selected = Some(selected.clone());
+                    state.reveal = true;
+                }
+            }
         });
     }
 }
@@ -138,7 +158,7 @@ fn text_value<'a>(elements: &'a mut [Element], control: &str) -> Option<&'a mut 
 
 pub fn visit_trees<'a>(elements: &'a [Element], f: &mut impl FnMut(&'a str, &'a [TreeNode])) {
     walk(elements, &mut |element| {
-        if let Element::Tree { id, nodes } = element {
+        if let Element::Tree { id, nodes, .. } = element {
             f(id, nodes);
         }
     });
@@ -459,7 +479,7 @@ fn show_elements(ui: &mut Ui, cx: &mut Cx, elements: &mut [Element]) {
                     *cx.focused = Some(id.clone());
                 }
             }
-            Element::Tree { id, nodes } => {
+            Element::Tree { id, nodes, .. } => {
                 let focus = cx.take_focus(id);
                 let mut tree = Tree {
                     panel,
@@ -1075,6 +1095,29 @@ mod tests {
         ]));
         next.keep_state(first);
         assert_eq!(next.lists["t"].expanded, HashSet::from(["c".into()]));
+    }
+
+    #[test]
+    fn selected_hint_applies_only_without_a_selection() {
+        let panel = |selected| {
+            serde_json::from_value::<Panel>(json!({"id":"p", "title":"P", "elements":[
+                {"type":"tree", "id":"t", "selected": selected, "nodes": [
+                    {"id":"a", "label":"a"}, {"id":"b", "label":"b"},
+                ]},
+            ]}))
+            .unwrap()
+        };
+        let mut first = panel("missing");
+        first.expand_new_branches(None);
+        assert_eq!(first.lists["t"].selected, None);
+        let mut next = panel("a");
+        next.keep_state(first);
+        assert_eq!(next.lists["t"].selected.as_deref(), Some("a"));
+        assert!(next.lists["t"].reveal);
+        // The host's selection wins over the hint once there is one.
+        let mut last = panel("b");
+        last.keep_state(next);
+        assert_eq!(last.lists["t"].selected.as_deref(), Some("a"));
     }
 
     #[test]

@@ -60,6 +60,10 @@ floating_height = 0.65
 # Fractions of the workspace, capped at these many points on large displays.
 floating_max_width = 960
 floating_max_height = 640
+# Pane border corner radius in points; 0 for square corners.
+corner_radius = 5
+# Title bars on tiled panes. Floating panes keep theirs, since they move by it.
+title_bars = true
 
 # Environment for panes and plugin processes. $NAME and ${NAME} expand from
 # Slerm's environment, which is minimal for apps started from the Dock or Finder.

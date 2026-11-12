@@ -191,6 +191,10 @@ pub struct Panel {
     #[serde(skip)]
     #[ts(skip)]
     pub editing: Option<String>,
+    /// Where the panel was drawn in the last frame, for directional focus.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub rect: Option<egui::Rect>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, TS)]
@@ -384,6 +388,11 @@ pub enum Element {
     Tree {
         id: String,
         nodes: Vec<TreeNode>,
+        /// A node to select and scroll to while the tree has no selection, such
+        /// as when the panel is shown again or the selected node left the tree.
+        #[serde(default)]
+        #[ts(optional)]
+        selected: Option<String>,
     },
 }
 

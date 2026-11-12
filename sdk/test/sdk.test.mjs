@@ -122,6 +122,7 @@ test("host errors reject generated calls and surface callback failures", async (
 
 test("file tree follows the active pane, loads folders lazily, and opens files", async () => {
   const files = {
+    "/": ["project", "other"],
     "/project": ["src", "README.md"],
     "/project/src": ["main.rs", "lib"],
     "/project/src/lib": ["mod.rs"],
@@ -133,12 +134,13 @@ test("file tree follows the active pane, loads folders lazily, and opens files",
     reads.push(op.path);
     if (!files[op.path]) return { error: `Cannot read ${op.path}` };
     return { result: files[op.path].map(name => {
-      const path = `${op.path}/${name}`;
+      const path = `${op.path === "/" ? "" : op.path}/${name}`;
       return { name, path, kind: files[path] ? "directory" : "file", symlink: false };
     }).sort((a, b) => a.name < b.name ? -1 : 1) };
   };
   let cwd = "/project";
-  const state = () => ({ activeTab: 1, tabs: [{ id: 1, activePane: 2, panes: [{ id: 2, cwd }] }] });
+  let program = "zsh";
+  const state = () => ({ activeTab: 1, tabs: [{ id: 1, activePane: 2, panes: [{ id: 2, cwd, program: "zsh" }, { id: 3, cwd, program }] }] });
   const host = start(op => ({ result: op.method === "getState" ? state() : null }), fs);
   runInContext(readFileSync(new URL("../dist/filetree.js", import.meta.url), "utf8"), host.context);
   await settle();
@@ -148,8 +150,9 @@ test("file tree follows the active pane, loads folders lazily, and opens files",
   assert.deepEqual(host.operations.at(-1), { method: "focusPanel", panel: "files", control: "tree" });
   const panel = () => host.operations.findLast(op => op.method === "setPanel").panel;
   const text = () => panel().elements.filter(e => e.type === "text").map(e => e.text);
-  // Render loaded nodes as an indented outline; "+" marks an unloaded branch.
-  const outline = (nodes = panel().elements.at(-1).nodes, depth = 0) => nodes.flatMap(node => [
+  const tree = () => panel().elements.at(-1);
+  // Render the root's loaded nodes as an indented outline; "+" marks an unloaded branch.
+  const outline = (nodes = tree().nodes[0].children, depth = 0) => nodes.flatMap(node => [
     "  ".repeat(depth) + node.label + (node.branch && !node.children ? "+" : ""),
     ...outline(node.children ?? [], depth + 1),
   ]);
@@ -157,6 +160,7 @@ test("file tree follows the active pane, loads folders lazily, and opens files",
   const click = control => ui({ kind: "click", control });
 
   assert.equal(panel().placement, "left");
+  assert.deepEqual(tree().nodes.map(node => [node.id, node.label, node.expanded]), [["root:/project", "project", true]]);
   assert.deepEqual(outline(), ["src+", "README.md"]);
   assert.deepEqual(reads, ["/project"]);
 
@@ -175,6 +179,19 @@ test("file tree follows the active pane, loads folders lazily, and opens files",
   await ui({ kind: "activate", item: "/project/src/main.rs" });
   assert.deepEqual(host.operations.at(-1), { method: "openTerminal", program: "hx", args: ["--", "/project/src/main.rs"], cwd: "/project" });
 
+  // A running hx in the tab opens the file instead: Escape alone, then :open.
+  program = "hx";
+  await ui({ kind: "activate", item: "/project/my notes.md" });
+  assert.deepEqual(host.operations.slice(-2), [
+    { method: "focusPane", pane: 3 },
+    { method: "writeTerminal", pane: 3, text: "\x1b" },
+  ]);
+  const [[escape]] = [...host.timers].slice(-1);
+  host.context.__slerm_fire(escape);
+  await settle();
+  assert.deepEqual(host.operations.at(-1), { method: "writeTerminal", pane: 3, text: ':open "/project/my notes.md"\r' });
+  program = "zsh";
+
   // Refresh reloads loaded folders; one that vanished drops out.
   delete files["/project/src/lib"];
   files["/project/src"] = ["main.rs"];
@@ -190,8 +207,12 @@ test("file tree follows the active pane, loads folders lazily, and opens files",
   assert.ok(text().some(line => /Cannot read \/project\/src\/locked/.test(line)));
   assert.ok(outline().includes("  locked+"));
 
+  // Going up selects the folder we came from; expansion is remembered by path.
   await click("up");
   assert.equal(text()[0], "/");
+  assert.equal(tree().selected, "/project");
+  assert.deepEqual(outline(), ["other+", "project+"]);
+  assert.equal(tree().nodes[0].children[1].expanded, false);
   assert.deepEqual(panel().elements[0].elements.map(e => e.id), ["up", "refresh", "follow", "close"]);
 
   cwd = "/other";
@@ -199,8 +220,33 @@ test("file tree follows the active pane, loads folders lazily, and opens files",
   await settle();
   assert.equal(text()[0], "/other");
   assert.deepEqual(outline(), ["notes.txt"]);
-  // Vim keys drive the native tree; gg needs two presses.
+
+  // Returning to a pane's folder restores its expanded folders.
+  cwd = "/project";
+  host.context.__slerm_dispatch({ event: "state", state: state() });
+  await settle();
+  assert.deepEqual(outline(), ["src", "  locked", "  main.rs", "README.md"]);
+  assert.equal(tree().nodes[0].children[0].expanded, true);
+  cwd = "/other";
+  host.context.__slerm_dispatch({ event: "state", state: state() });
+  await settle();
+
   const key = key => ui({ kind: "key", key });
+  // h folds or moves to the parent node, unless the root is selected and folded.
+  await ui({ kind: "select", item: "root:/other" });
+  await key("H");
+  assert.deepEqual(host.operations.at(-1), { method: "navigate", panel: "files", control: "tree", to: "left" });
+  await ui({ kind: "toggle", item: "root:/other", expanded: false });
+  await key("H");
+  assert.equal(text()[0], "/");
+  assert.equal(tree().selected, "/other");
+  assert.equal(tree().nodes[0].expanded, true, "the new root starts expanded");
+  cwd = "/other";
+  host.context.__slerm_dispatch({ event: "state", state: { ...state(), activeTab: 1, tabs: [{ ...state().tabs[0], activePane: 3 }] } });
+  await settle();
+  assert.equal(tree().nodes[0].expanded, false, "a folded root stays folded");
+
+  // Vim keys drive the native tree; gg needs two presses.
   await key("J");
   assert.deepEqual(host.operations.at(-1), { method: "navigate", panel: "files", control: "tree", to: "next" });
   await key("Shift+G");
@@ -213,10 +259,12 @@ test("file tree follows the active pane, loads folders lazily, and opens files",
   assert.deepEqual(panel().keys.sort(), ["Ctrl+D", "Ctrl+U", "G", "H", "J", "K", "L", "Minus", "O", "Q", "R", "Shift+G"]);
   await key("Minus");
   assert.equal(text()[0], "/");
+  await ui({ kind: "select", item: "/project" });
   await key("Q");
   assert.equal(host.operations.at(-1).method, "removePanel");
   host.context.__slerm_dispatch({ event: "command", command: "toggle-files" });
   await settle();
+  assert.equal(tree().selected, "/project", "the selection survives hiding the panel");
   host.context.__slerm_dispatch({ event: "command", command: "toggle-files" });
   await settle();
   assert.equal(host.operations.at(-1).method, "removePanel");

@@ -80,6 +80,10 @@ Default key bindings:
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
 | `Ctrl+Shift+R` | Reload config |
 
+Directional focus and next/previous pane also reach plugin panels: side panels
+sit beyond the outermost panes, and next/previous visits every panel after the
+panes. While floating panes are shown, navigation stays among them.
+
 Plugin commands can be bound too, for example `"Super+G" = "plugin:git/toggle-git"`.
 
 ## Plugins
