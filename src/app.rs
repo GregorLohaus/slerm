@@ -326,6 +326,7 @@ impl App {
                             cwd: self.panes[id]
                                 .cwd()
                                 .and_then(|path| path.to_str().map(str::to_owned)),
+                            program: self.panes[id].pty.program(),
                         })
                         .collect(),
                 })
@@ -388,6 +389,7 @@ impl App {
                     floating: false,
                     exited: false,
                     cwd: cwd.to_str().map(str::to_owned),
+                    program: None,
                 }));
             }
             Operation::Execute { action } => {
@@ -460,6 +462,8 @@ impl App {
                 );
                 if let Some(previous) = panels.remove(&panel.id) {
                     panel.keep_state(previous);
+                } else {
+                    panel.expand_new_branches(None);
                 }
                 panels.insert(panel.id.clone(), panel);
             }

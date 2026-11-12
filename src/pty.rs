@@ -122,6 +122,11 @@ impl Pty {
         process_cwd(self.master.process_group_leader()?)
     }
 
+    /// The process name of the foreground process group's leader.
+    pub fn program(&self) -> Option<String> {
+        process_name(self.master.process_group_leader()?)
+    }
+
     pub fn resize(&self, cols: u16, rows: u16, cw: u32, ch: u32) -> Result<()> {
         self.master.resize(PtySize {
             cols,
@@ -328,6 +333,30 @@ fn process_cwd(pid: i32) -> Option<PathBuf> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn process_cwd(_pid: i32) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_name(pid: i32) -> Option<String> {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some(name.trim_end_matches('\n').to_owned()).filter(|name| !name.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn process_name(pid: i32) -> Option<String> {
+    unsafe extern "C" {
+        fn proc_name(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
+    }
+    // <sys/proc_info.h> caps names at 2 * MAXCOMLEN bytes.
+    let mut buffer = [0u8; 64];
+    // SAFETY: the call writes at most `buffer.len()` bytes and returns how many.
+    let written = unsafe { proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    let name = buffer.get(..usize::try_from(written).ok()?)?;
+    (!name.is_empty()).then(|| String::from_utf8_lossy(name).into_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_name(_pid: i32) -> Option<String> {
     None
 }
 

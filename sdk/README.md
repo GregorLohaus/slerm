@@ -108,7 +108,8 @@ incompatible changes; Slerm rejects bundles built for another API version.
 `import { fs } from "@slerm/plugin-sdk"` gives filesystem access. Like the API
 above, its methods are generated from Rust (`FsOperation` in `plugin_api.rs`),
 but they run on the plugin's own worker thread instead of the UI thread. Paths
-must be absolute; `PaneState.cwd` gives each pane's working directory.
+must be absolute; `PaneState.cwd` gives each pane's working directory, and
+`PaneState.program` the process name of its foreground program, such as `hx`.
 
 | Method | Purpose |
 | --- | --- |
@@ -218,11 +219,14 @@ glyph (Nerd Font icons work when the terminal font has them), and `children`.
 Slerm owns expansion and selection, keyed by node ID, so they survive updates and
 need no round trip. A node with `branch: true` and no `children` is unloaded:
 expanding it sends a `toggle` event, and the plugin sends the panel again with
-its children. Double-clicking or pressing Enter on a leaf sends `activate`.
+its children. A branch with `expanded: true` starts expanded when its ID first
+appears, so a plugin can restore folders it remembers from `toggle` events.
+Double-clicking or pressing Enter on a leaf sends `activate`.
 
 See [`examples/panes.ts`](examples/panes.ts);
 [`examples/filetree.ts`](examples/filetree.ts), a file browser sidebar that
-follows the active pane's directory and opens files in `hx`; and
+follows the active pane's directory and opens files in `hx`, reusing one already
+running in the tab; and
 [`examples/git.ts`](examples/git.ts), a git sidebar that refreshes on a timer,
 stages files, commits, and opens diffs; and
 [`examples/hackernews.ts`](examples/hackernews.ts), a Hacker News reader that

@@ -122,6 +122,8 @@ pub struct PaneState {
     pub floating: bool,
     pub exited: bool,
     pub cwd: Option<String>,
+    /// The foreground program's process name, such as `"zsh"` or `"hx"`.
+    pub program: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, TS)]
@@ -234,6 +236,11 @@ pub struct TreeNode {
     #[serde(default)]
     #[ts(optional)]
     pub children: Option<Vec<TreeNode>>,
+    /// Expand this branch when its ID first appears in the tree. After that the
+    /// host keeps its expansion, so a plugin can restore folders it remembers.
+    #[serde(default)]
+    #[ts(optional)]
+    pub expanded: Option<bool>,
 }
 
 impl TreeNode {

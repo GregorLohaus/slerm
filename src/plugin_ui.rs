@@ -49,6 +49,7 @@ impl Panel {
             _ => {}
         });
         self.lists = lists;
+        self.expand_new_branches(Some(&previous));
         self.focused = previous.focused;
         self.focus_request = previous.focus_request;
         // An update built before the plugin saw the latest keystrokes would
@@ -59,6 +60,37 @@ impl Panel {
         {
             *value = std::mem::take(typed);
             self.editing = Some(id);
+        }
+    }
+}
+
+impl Panel {
+    /// Expand branches marked `expanded` that the previous panel's tree of the
+    /// same ID did not contain, or every marked branch of a new panel.
+    pub fn expand_new_branches(&mut self, previous: Option<&Panel>) {
+        let lists = &mut self.lists;
+        visit_trees(&self.elements, &mut |tree, nodes| {
+            let mut old = HashSet::new();
+            if let Some(previous) = previous {
+                visit_trees(&previous.elements, &mut |id, nodes| {
+                    if id == tree {
+                        collect_ids(nodes, &mut old);
+                    }
+                });
+            }
+            let state = lists.entry(tree.to_owned()).or_default();
+            mark_expanded(nodes, &old, &mut state.expanded);
+        });
+    }
+}
+
+fn mark_expanded(nodes: &[TreeNode], old: &HashSet<&str>, expanded: &mut HashSet<String>) {
+    for node in nodes {
+        if node.expanded == Some(true) && !old.contains(node.id.as_str()) {
+            expanded.insert(node.id.clone());
+        }
+        if let Some(children) = &node.children {
+            mark_expanded(children, old, expanded);
         }
     }
 }
@@ -1017,6 +1049,32 @@ mod tests {
         let state = &next.lists["t"];
         assert_eq!(state.expanded, HashSet::from(["a".into()]));
         assert_eq!(state.selected, None);
+    }
+
+    #[test]
+    fn expanded_hint_applies_only_to_new_nodes() {
+        let panel = |nodes| {
+            serde_json::from_value::<Panel>(
+                json!({"id":"p", "title":"P", "elements":[{"type":"tree", "id":"t", "nodes": nodes}]}),
+            )
+            .unwrap()
+        };
+        let mut first = panel(json!([
+            {"id":"a", "label":"a", "branch":true, "expanded":true},
+            {"id":"b", "label":"b", "branch":true},
+        ]));
+        first.expand_new_branches(None);
+        assert_eq!(first.lists["t"].expanded, HashSet::from(["a".into()]));
+        // The user collapses a; the hint no longer overrides it, but applies to c.
+        first.lists.get_mut("t").unwrap().expanded.clear();
+        let mut next = panel(json!([
+            {"id":"a", "label":"a", "branch":true, "expanded":true},
+            {"id":"b", "label":"b", "children":[
+                {"id":"c", "label":"c", "branch":true, "expanded":true},
+            ]},
+        ]));
+        next.keep_state(first);
+        assert_eq!(next.lists["t"].expanded, HashSet::from(["c".into()]));
     }
 
     #[test]

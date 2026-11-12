@@ -2,6 +2,8 @@ import { definePlugin, fs, type DirEntry, type Element, type Navigation, type Sl
 
 // Use an absolute path if hx is not on the GUI application's PATH.
 const EDITOR = "hx";
+// Process names of a running editor to reuse, including Nix's wrapped binaries.
+const EDITOR_PROCESS = /^\.?(hx|helix)(-wrapped)?$/;
 // Nerd Font glyphs. Slerm's UI font falls back to the terminal's fonts.
 const FOLDER = "";
 const FILE = "";
@@ -12,16 +14,22 @@ const ICONS: Record<string, string> = {
 // The host accepts at most 16384 tree nodes per panel.
 const MAX_NODES = 16_000;
 // Vim-style keys, sent while the tree has focus. Escape returns to the terminal.
+// Arrow keys still fold and unfold folders.
 const MOVES: Record<string, Navigation> = {
-  J: "next", K: "previous", H: "left", L: "right", O: "activate",
+  J: "next", K: "previous", O: "activate",
   "Shift+G": "last", "Ctrl+D": "pageDown", "Ctrl+U": "pageUp",
 };
-const KEYS = [...Object.keys(MOVES), "G", "Minus", "R", "Q"];
+const KEYS = [...Object.keys(MOVES), "G", "H", "L", "Minus", "R", "Q"];
 
 let root: string | undefined;
-// Listings of the directories loaded so far. The host keeps expansion state, so
-// collapsed folders stay loaded and reopen instantly.
+// Listings of the directories loaded under the root. Collapsed folders stay
+// loaded and reopen instantly.
 const listings = new Map<string, DirEntry[]>();
+// Expanded folders by path, kept across roots so switching panes and tabs
+// restores them. The host owns expansion while a node stays in the tree.
+const expanded = new Set<string>();
+// The tree node under the cursor.
+let selected: string | undefined;
 let follow = true;
 let shown = false;
 let lastG = 0;
@@ -36,11 +44,21 @@ async function load(dir: string) {
   listings.set(dir, entries.sort((a, b) => folder(a) - folder(b) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
 }
 
+// Load a folder and the expanded folders inside it.
+async function loadOpen(dir: string) {
+  await load(dir);
+  for (const entry of listings.get(dir) ?? []) {
+    if (entry.kind === "directory" && expanded.has(entry.path)) {
+      try { await loadOpen(entry.path); } catch { expanded.delete(entry.path); }
+    }
+  }
+}
+
 async function open(dir: string | undefined) {
   root = dir;
   error = "";
   listings.clear();
-  if (dir) await load(dir);
+  if (dir) await loadOpen(dir);
 }
 
 async function refresh() {
@@ -60,7 +78,7 @@ function nodes(dir: string, budget: { left: number }): TreeNode[] {
       result.push({ id: entry.path, label, icon: ICONS[entry.name.split(".").pop()!] ?? FILE });
     } else {
       // Unloaded folders are branches without children; expanding one asks us to load it.
-      result.push({ id: entry.path, label, icon: FOLDER, branch: true,
+      result.push({ id: entry.path, label, icon: FOLDER, branch: true, expanded: expanded.has(entry.path),
         children: listings.has(entry.path) ? nodes(entry.path, budget) : undefined });
     }
   }
@@ -83,7 +101,7 @@ async function show(api: Slerm) {
   ];
   if (status) elements.push({ type: "text", text: status });
   elements.push(
-    { type: "text", text: "j/k move · h/l fold · o open · gg/G ends · - up · r refresh · q close", style: "small" },
+    { type: "text", text: "j/k move · h up · l enter · o open · gg/G ends · r refresh · q close", style: "small" },
     { type: "tree", id: "tree", nodes: tree },
   );
   await api.setPanel({ panel: { id: "files", title: "Files", placement: "left", keys: KEYS, elements } });
@@ -95,7 +113,37 @@ async function hide(api: Slerm) {
 }
 
 async function up() {
-  if (root && root !== "/") await open(root.slice(0, root.lastIndexOf("/")) || "/");
+  if (!root || root === "/") return;
+  // Show the folder we came from expanded in its parent.
+  expanded.add(root);
+  await open(root.slice(0, root.lastIndexOf("/")) || "/");
+}
+
+function entry(path: string | undefined): DirEntry | undefined {
+  for (const entries of listings.values()) {
+    const found = entries.find(entry => entry.path === path);
+    if (found) return found;
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(() => resolve(), ms));
+
+// Open a file in a running editor in the active tab, or in a new pane.
+async function edit(api: Slerm, path: string) {
+  const state = await api.getState();
+  const tab = state.tabs.find(tab => tab.id === state.activeTab);
+  const editor = tab?.panes.find(pane => !pane.exited && EDITOR_PROCESS.test(pane.program ?? ""));
+  if (!editor) {
+    if (root) await api.openTerminal({ program: EDITOR, args: ["--", path], cwd: root });
+    return;
+  }
+  await api.focusPane({ pane: editor.id });
+  // Escape leaves insert mode or a prompt. It goes alone, since helix reads an
+  // Escape followed at once by another key as Alt with that key.
+  await api.writeTerminal({ pane: editor.id, text: "\x1b" });
+  await sleep(50);
+  const arg = /[\s"]/.test(path) ? `"${path.replace(/["\\]/g, "\\$&")}"` : path;
+  await api.writeTerminal({ pane: editor.id, text: `:open ${arg}\r` });
 }
 
 async function followState(state: State): Promise<boolean> {
@@ -148,13 +196,27 @@ definePlugin({
           }
           if (data.key === "Q") return await hide(api);
           if (data.key === "R") await refresh();
-          if (data.key === "Minus") await up();
-        } else if (data.kind === "toggle") {
-          if (!data.expanded || listings.has(data.item)) return;
-          await load(data.item);
-        } else if (data.kind === "activate" && root) {
-          await api.openTerminal({ program: EDITOR, args: ["--", data.item], cwd: root });
+          if (data.key === "H" || data.key === "Minus") await up();
+          if (data.key === "L") {
+            // Enter the folder under the cursor, or open the file.
+            const target = entry(selected);
+            if (!target) return;
+            if (target.kind !== "directory") return await edit(api, target.path);
+            await open(target.path);
+          }
+        } else if (data.kind === "select") {
+          selected = data.item;
           return;
+        } else if (data.kind === "toggle") {
+          if (!data.expanded) {
+            expanded.delete(data.item);
+            return;
+          }
+          expanded.add(data.item);
+          if (listings.has(data.item)) return;
+          await loadOpen(data.item);
+        } else if (data.kind === "activate") {
+          return await edit(api, data.item);
         } else {
           return;
         }

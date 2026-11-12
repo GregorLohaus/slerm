@@ -12,7 +12,11 @@ export type State = { activeTab: number | null, tabs: Array<TabState>, };
 
 export type TabState = { id: number, activePane: number, floatsVisible: boolean, zoomed: boolean, panes: Array<PaneState>, };
 
-export type PaneState = { id: number, title: string, floating: boolean, exited: boolean, cwd: string | null, };
+export type PaneState = { id: number, title: string, floating: boolean, exited: boolean, cwd: string | null, 
+/**
+ * The foreground program's process name, such as `"zsh"` or `"hx"`.
+ */
+program: string | null, };
 
 export type FsOperation = { "method": "readDir", "params": { path: string, } } | { "method": "stat", "params": { path: string, } } | { "method": "readFile", "params": { path: string, } } | { "method": "writeFile", "params": { path: string, text: string, } } | { "method": "createDir", "params": { path: string, } } | { "method": "remove", "params": { path: string, } } | { "method": "rename", "params": { from: string, to: string, } };
 
@@ -65,7 +69,12 @@ export type TreeNode = { id: string, label: string,
 /**
  * A short glyph shown before the label, such as a Nerd Font icon.
  */
-icon?: string, branch?: boolean, children?: Array<TreeNode>, };
+icon?: string, branch?: boolean, children?: Array<TreeNode>, 
+/**
+ * Expand this branch when its ID first appears in the tree. After that the
+ * host keeps its expansion, so a plugin can restore folders it remembers.
+ */
+expanded?: boolean, };
 
 export type TextStyle = "heading" | "strong" | "weak" | "small" | "monospace";
 
