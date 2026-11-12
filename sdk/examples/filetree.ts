@@ -14,12 +14,11 @@ const ICONS: Record<string, string> = {
 // The host accepts at most 16384 tree nodes per panel.
 const MAX_NODES = 16_000;
 // Vim-style keys, sent while the tree has focus. Escape returns to the terminal.
-// Arrow keys still fold and unfold folders.
 const MOVES: Record<string, Navigation> = {
-  J: "next", K: "previous", O: "activate",
+  J: "next", K: "previous", L: "right", O: "activate",
   "Shift+G": "last", "Ctrl+D": "pageDown", "Ctrl+U": "pageUp",
 };
-const KEYS = [...Object.keys(MOVES), "G", "H", "L", "Minus", "R", "Q"];
+const KEYS = [...Object.keys(MOVES), "G", "H", "Minus", "R", "Q"];
 
 let root: string | undefined;
 // Listings of the directories loaded under the root. Collapsed folders stay
@@ -28,7 +27,8 @@ const listings = new Map<string, DirEntry[]>();
 // Expanded folders by path, kept across roots so switching panes and tabs
 // restores them. The host owns expansion while a node stays in the tree.
 const expanded = new Set<string>();
-// The tree node under the cursor.
+// The tree node under the cursor. The host drops its selection when the node
+// leaves the tree, so this is only trusted for nodes under the root.
 let selected: string | undefined;
 let follow = true;
 let shown = false;
@@ -101,7 +101,7 @@ async function show(api: Slerm) {
   ];
   if (status) elements.push({ type: "text", text: status });
   elements.push(
-    { type: "text", text: "j/k move · h up · l enter · o open · gg/G ends · r refresh · q close", style: "small" },
+    { type: "text", text: "j/k move · h fold/up · l expand · o open · gg/G ends · r refresh · q close", style: "small" },
     { type: "tree", id: "tree", nodes: tree },
   );
   await api.setPanel({ panel: { id: "files", title: "Files", placement: "left", keys: KEYS, elements } });
@@ -117,13 +117,6 @@ async function up() {
   // Show the folder we came from expanded in its parent.
   expanded.add(root);
   await open(root.slice(0, root.lastIndexOf("/")) || "/");
-}
-
-function entry(path: string | undefined): DirEntry | undefined {
-  for (const entries of listings.values()) {
-    const found = entries.find(entry => entry.path === path);
-    if (found) return found;
-  }
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(() => resolve(), ms));
@@ -196,14 +189,11 @@ definePlugin({
           }
           if (data.key === "Q") return await hide(api);
           if (data.key === "R") await refresh();
-          if (data.key === "H" || data.key === "Minus") await up();
-          if (data.key === "L") {
-            // Enter the folder under the cursor, or open the file.
-            const target = entry(selected);
-            if (!target) return;
-            if (target.kind !== "directory") return await edit(api, target.path);
-            await open(target.path);
+          if (data.key === "H" && root && selected?.startsWith(root.endsWith("/") ? root : `${root}/`) && expanded.has(selected)) {
+            // Fold the expanded folder under the cursor; the toggle event updates `expanded`.
+            return await api.navigate({ panel: "files", control: "tree", to: "left" });
           }
+          if (data.key === "H" || data.key === "Minus") await up();
         } else if (data.kind === "select") {
           selected = data.item;
           return;
