@@ -49,22 +49,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          if gh release view "v$version" >/dev/null 2>&1; then
-            echo "Release v$version already exists; bump the version in Cargo.toml to publish a new one."
+          if draft="$(gh release view "v$version" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            # A draft is invisible to everyone else, so Homebrew's download would 404.
+            if [[ "$draft" == true ]]; then
+              gh release edit "v$version" --draft=false
+              echo "Published the existing draft release v$version."
+            else
+              echo "Release v$version already exists; bump the version in Cargo.toml to publish a new one."
+            fi
             exit 0
           fi
           gh release create "v$version" target/bundle/slerm-* \
-            --target "$GITHUB_SHA" --title "slerm $version" --generate-notes
+            --target "$GITHUB_SHA" --title "slerm $version" --generate-notes --draft=false
 
       # Points `brew install --cask <owner>/tap/slerm` at the release for the version in
-      # Cargo.toml. It runs on every push, so a missed update is repaired by the next one, and it
-      # hashes the zip attached to the release rather than this run's rebuild, which can differ.
+      # Cargo.toml. It runs on every push, so a missed update is repaired by the next one. It
+      # downloads the zip anonymously from the same URL the cask uses, so the tap is only updated
+      # once Homebrew can fetch it, and the checksum is of the published zip rather than this
+      # run's rebuild, which can differ.
       # Needs a HOMEBREW_TAP_TOKEN secret: a fine-grained token with Contents read/write on the
       # <owner>/homebrew-tap repo.
       - name: Update Homebrew cask
         if: github.ref == 'refs/heads/main'
         env:
-          GH_TOKEN: ${{ github.token }}
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAP: ${{ github.repository_owner }}/homebrew-tap
         run: |
@@ -74,7 +81,11 @@ jobs:
           fi
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           zip="slerm-$version-macos-arm64.zip"
-          gh release download "v$version" --pattern "$zip" --dir "$RUNNER_TEMP" --clobber
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$version/$zip"
+          if ! curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/$zip" "$url"; then
+            echo "::error::$url isn't publicly downloadable; is the release still a draft?"
+            exit 1
+          fi
           git clone -q --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" "$RUNNER_TEMP/tap"
           mkdir -p "$RUNNER_TEMP/tap/Casks"
           REPO="$GITHUB_REPOSITORY" scripts/homebrew-cask.sh "$version" "$RUNNER_TEMP/$zip" \
