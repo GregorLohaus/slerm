@@ -786,6 +786,25 @@ impl App {
 }
 
 impl eframe::App for App {
+    #[cfg(target_os = "macos")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Winit's file drags carry no position and the drag sends no cursor
+        // moves, so egui would still see the pointer where it last left the
+        // window. Ask AppKit where the drag is, so the highlight follows it and
+        // the drop lands on the pane under it.
+        let hovering = !raw_input.hovered_files.is_empty();
+        if (hovering || !raw_input.dropped_files.is_empty())
+            && let Some(pos) = crate::macos::cursor_position()
+        {
+            raw_input
+                .events
+                .push(egui::Event::PointerMoved(pos / ctx.zoom_factor()));
+        }
+        if hovering {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         {

@@ -7,7 +7,7 @@ use objc2::{
     runtime::{AnyObject, Imp, Sel},
     sel,
 };
-use objc2_app_kit::{NSApplication, NSImage, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSImage, NSMenu, NSMenuItem, NSView};
 use objc2_foundation::{NSData, ns_string};
 use std::{
     cell::RefCell,
@@ -16,6 +16,7 @@ use std::{
 
 thread_local! {
     static DOCK_MENU: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) };
+    static VIEW: RefCell<Option<Retained<NSView>>> = const { RefCell::new(None) };
 }
 static CONTEXT: OnceLock<egui::Context> = OnceLock::new();
 static NEW_WINDOW: OnceLock<Box<dyn Fn() -> Result<()> + Send + Sync>> = OnceLock::new();
@@ -139,4 +140,33 @@ pub fn apply_icon() -> Result<()> {
         NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&icon));
     }
     Ok(())
+}
+
+/// Remember the window's content view, so `cursor_position` can find it.
+pub fn track_view(window: &impl raw_window_handle::HasWindowHandle) -> Result<()> {
+    let raw_window_handle::RawWindowHandle::AppKit(handle) = window.window_handle()?.as_raw()
+    else {
+        anyhow::bail!("Window is not an AppKit window");
+    };
+    // SAFETY: winit's handle points at the window's live NSView. Retaining it
+    // keeps the object valid for as long as it is stored here.
+    let view = unsafe { Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }
+        .context("Window has no content view")?;
+    VIEW.with(|slot| *slot.borrow_mut() = Some(view));
+    Ok(())
+}
+
+/// Where the mouse is, in points from the content view's top-left corner.
+/// Winit reports file drags without a position and sends no cursor moves
+/// while one is in progress, so drops use this to find the pane under them.
+pub fn cursor_position() -> Option<egui::Pos2> {
+    VIEW.with(|slot| {
+        let slot = slot.borrow();
+        let view = slot.as_ref()?;
+        let window = view.window()?;
+        // Winit's view is flipped, so this is relative to its top-left corner,
+        // in the same points winit uses for cursor events.
+        let point = view.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
+        Some(egui::pos2(point.x as f32, point.y as f32))
+    })
 }

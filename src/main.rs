@@ -116,6 +116,10 @@ fn main() -> Result<()> {
             let window_config = path.clone();
             let app = app::App::new(cc, config, path)?;
             #[cfg(target_os = "macos")]
+            if let Err(e) = macos::track_view(cc) {
+                eprintln!("slerm: file drops will go to the active pane: {e:#}");
+            }
+            #[cfg(target_os = "macos")]
             macos::install(&cc.egui_ctx, move || {
                 // Independent windows keep running when their opener closes.
                 let mut child = std::process::Command::new(std::env::current_exe()?)

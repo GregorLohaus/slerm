@@ -55,3 +55,36 @@ jobs:
           fi
           gh release create "v$version" target/bundle/slerm-* \
             --target "$GITHUB_SHA" --title "slerm $version" --generate-notes
+
+      # Points `brew install --cask <owner>/tap/slerm` at the release for the version in
+      # Cargo.toml. It runs on every push, so a missed update is repaired by the next one, and it
+      # hashes the zip attached to the release rather than this run's rebuild, which can differ.
+      # Needs a HOMEBREW_TAP_TOKEN secret: a fine-grained token with Contents read/write on the
+      # <owner>/homebrew-tap repo.
+      - name: Update Homebrew cask
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP: ${{ github.repository_owner }}/homebrew-tap
+        run: |
+          if [[ -z "$TAP_TOKEN" ]]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN isn't set, so $TAP keeps its current slerm cask"
+            exit 0
+          fi
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          zip="slerm-$version-macos-arm64.zip"
+          gh release download "v$version" --pattern "$zip" --dir "$RUNNER_TEMP" --clobber
+          git clone -q --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          REPO="$GITHUB_REPOSITORY" scripts/homebrew-cask.sh "$version" "$RUNNER_TEMP/$zip" \
+            > "$RUNNER_TEMP/tap/Casks/slerm.rb"
+          cd "$RUNNER_TEMP/tap"
+          git add Casks/slerm.rb
+          if git diff --cached --quiet; then
+            echo "The cask is already at $version"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "slerm $version"
+          git push -q origin HEAD

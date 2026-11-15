@@ -25,10 +25,16 @@ panels.
 
 ## Install (macOS, Apple Silicon)
 
-Download `slerm-<version>-macos-arm64.zip` from the
-[Releases](../../releases) page, unzip it, and drag `slerm.app` into `/Applications`.
+With [Homebrew](https://brew.sh):
 
-The app is ad-hoc signed, not notarized, so Gatekeeper blocks the first launch. Either
+```sh
+brew install --cask gregorlohaus/tap/slerm
+```
+
+The cask also links the `slerm` command and clears the quarantine flag for you.
+
+Or download `slerm-<version>-macos-arm64.zip` from the [Releases](../../releases) page,
+unzip it, and drag `slerm.app` into `/Applications`. The app is ad-hoc signed, not notarized, so Gatekeeper blocks the first launch. Either
 right-click the app and choose **Open**, or clear the quarantine flag:
 
 ```sh
@@ -118,6 +124,12 @@ macOS app on GitHub Actions and uploads it as a build artifact. If no release ex
 yet for the `version` in `Cargo.toml`, it also publishes `v<version>` on GitHub
 Releases with the zip and its SHA-256 checksum. To cut a new release, bump the version
 and push to `main`; no tag is needed, so it works with a Gitea-to-GitHub mirror.
+
+The same workflow then points the `slerm` cask in
+[GregorLohaus/homebrew-tap](https://github.com/GregorLohaus/homebrew-tap) at that release,
+using [`scripts/homebrew-cask.sh`](scripts/homebrew-cask.sh), so edit the cask there. This
+needs a `HOMEBREW_TAP_TOKEN` repository secret: a fine-grained token with Contents
+read/write on the tap. Without it the workflow skips the cask update with a warning.
 
 ## License
 

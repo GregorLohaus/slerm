@@ -56,8 +56,11 @@ fn main() -> anyhow::Result<()> {
             file.performActionForItemAtIndex(0);
             assert_eq!(opened.load(Ordering::Relaxed), 2);
             assert!(macos::take_error().is_none());
+            macos::track_view(cc)?;
+            let cursor = macos::cursor_position().expect("AppKit cursor position");
+            assert!(cursor.x.is_finite() && cursor.y.is_finite());
             assert!(app.applicationIconImage().is_some());
-            println!("Dock action, File > New Window, no shortcut interception, and application icon verified");
+            println!("Dock action, File > New Window, no shortcut interception, cursor position ({cursor:?}) and application icon verified");
             Ok(Box::new(Smoke))
         }),
     )

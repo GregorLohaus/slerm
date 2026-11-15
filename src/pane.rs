@@ -17,7 +17,81 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc::TryRecvError,
+    time::{Duration, Instant},
 };
+
+const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
+const END_SYNC: &[u8] = b"\x1b[?2026l";
+/// How long an application may leave a synchronized update open before its
+/// output is shown anyway, so a crashed program cannot freeze the pane.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(1);
+const SYNC_LIMIT: usize = 8 << 20;
+
+/// Holds back PTY output that belongs to an unfinished synchronized update
+/// (DEC mode 2026), like kitty does. Editors such as Helix wrap each redraw in
+/// these markers, but a redraw arrives in many PTY reads. Parsing only up to
+/// the start of an open update means the terminal is always between complete
+/// frames when it is painted, however fast the application redraws.
+#[derive(Default)]
+pub(crate) struct SyncBuffer {
+    pending: Vec<u8>,
+    /// When the bytes still held began to be held.
+    since: Option<Instant>,
+}
+
+impl SyncBuffer {
+    /// Queues PTY output and returns the bytes that are safe to parse now.
+    pub(crate) fn push(&mut self, data: &[u8], now: Instant) -> Vec<u8> {
+        self.pending.extend_from_slice(data);
+        self.take_ready(now)
+    }
+
+    /// Returns the bytes that are safe to parse now, or everything once the
+    /// held update has timed out or grown too large.
+    pub(crate) fn take_ready(&mut self, now: Instant) -> Vec<u8> {
+        let expired = self
+            .since
+            .is_some_and(|since| now.duration_since(since) >= SYNC_TIMEOUT)
+            || self.pending.len() > SYNC_LIMIT;
+        let ready = if expired {
+            self.pending.len()
+        } else {
+            unfinished_sync(&self.pending)
+        };
+        let held = self.pending.split_off(ready);
+        let ready = std::mem::replace(&mut self.pending, held);
+        // Releasing bytes while still holding means an update ended and the
+        // held bytes start a new one, which gets its own timeout.
+        self.since = if self.pending.is_empty() {
+            None
+        } else if ready.is_empty() {
+            self.since.or(Some(now))
+        } else {
+            Some(now)
+        };
+        ready
+    }
+
+    /// When the held bytes must be released even without an end marker.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.since.map(|since| since + SYNC_TIMEOUT)
+    }
+}
+
+/// Where the held part of `bytes` starts: at the last begin marker that has
+/// no end marker after it, or at a begin marker cut off by the end of a read.
+fn unfinished_sync(bytes: &[u8]) -> usize {
+    let last = |marker: &[u8]| bytes.windows(marker.len()).rposition(|w| w == marker);
+    if let Some(begin) = last(BEGIN_SYNC)
+        && last(END_SYNC).is_none_or(|end| end < begin)
+    {
+        return begin;
+    }
+    (1..BEGIN_SYNC.len())
+        .rev()
+        .find(|&n| bytes.ends_with(&BEGIN_SYNC[..n]))
+        .map_or(bytes.len(), |n| bytes.len() - n)
+}
 
 pub struct Pane {
     pub terminal: Terminal<'static, 'static>,
@@ -36,6 +110,7 @@ pub struct Pane {
     selection_start: Option<PointCoordinate>,
     focused: bool,
     saved_session: Option<(Box<Pane>, ScrollbackFile)>,
+    sync: SyncBuffer,
 }
 
 struct ScrollbackFile(PathBuf);
@@ -125,6 +200,113 @@ mod scroll_tests {
         assert_eq!(scroll.wheel(Point, -32.0, 16.0, 24), -2);
         assert_eq!(scroll.wheel(Line, 1.0, 16.0, 24), 3);
         assert_eq!(scroll.wheel(Page, -1.0, 16.0, 24), -24);
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    #[test]
+    fn output_is_held_only_while_a_synchronized_update_is_open() {
+        let now = Instant::now();
+        let mut sync = SyncBuffer::default();
+        assert_eq!(sync.push(b"plain $ ", now), b"plain $ ");
+        assert_eq!(sync.deadline(), None);
+
+        // A redraw split across reads is released once it is complete.
+        assert_eq!(sync.push(b"before\x1b[?2026h\x1b[2Jhal", now), b"before");
+        assert_eq!(sync.deadline(), Some(now + SYNC_TIMEOUT));
+        assert_eq!(sync.push(b"f", now), b"");
+        assert_eq!(
+            sync.push(b" done\x1b[?2026lafter", now),
+            b"\x1b[?2026h\x1b[2Jhalf done\x1b[?2026lafter"
+        );
+        assert_eq!(sync.deadline(), None);
+
+        // A read that ends one redraw and starts the next releases only the first.
+        let later = now + Duration::from_millis(900);
+        sync.push(b"\x1b[?2026hone", now);
+        assert_eq!(
+            sync.push(b"\x1b[?2026l\x1b[?2026htwo", later),
+            b"\x1b[?2026hone\x1b[?2026l"
+        );
+        assert_eq!(sync.deadline(), Some(later + SYNC_TIMEOUT));
+
+        // A begin marker cut off by the end of a read is held until it completes.
+        let mut sync = SyncBuffer::default();
+        assert_eq!(sync.push(b"text\x1b[?20", now), b"text");
+        assert_eq!(sync.push(b"26hframe", now), b"");
+        assert_eq!(
+            sync.push(b"\x1b[?2026l", now),
+            b"\x1b[?2026hframe\x1b[?2026l"
+        );
+    }
+
+    #[test]
+    fn an_update_that_never_ends_is_released_after_the_timeout() {
+        let now = Instant::now();
+        let mut sync = SyncBuffer::default();
+        assert_eq!(sync.push(b"\x1b[?2026hstuck", now), b"");
+        assert_eq!(sync.take_ready(now + SYNC_TIMEOUT / 2), b"");
+        assert_eq!(sync.take_ready(now + SYNC_TIMEOUT), b"\x1b[?2026hstuck");
+        assert_eq!(sync.deadline(), None);
+    }
+
+    #[test]
+    fn continuous_redraws_never_paint_a_partial_frame() {
+        let ctx = egui::Context::default();
+        let config = Config::default();
+        let mut term = terminal(&config, &theme::DEFAULT).unwrap();
+        term.resize(20, 3, 8, 16).unwrap();
+        let mut renderer = Renderer::new().unwrap();
+        let font = FontId::monospace(16.0);
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, vec2(160.0, 48.0));
+        let paint = |renderer: &mut Renderer, term: &Terminal<'static, '_>| {
+            ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                let grid = Grid {
+                    rect,
+                    cell: cell_size(&painter, &font),
+                    font: &font,
+                    theme: &theme::DEFAULT,
+                    active: true,
+                };
+                renderer.paint(term, &painter, &grid).unwrap();
+            })
+            .shapes
+        };
+        let frame = |n: usize| {
+            format!("\x1b[?2026h\x1b[2J\x1b[Hline {n}\r\nline {n}\r\nline {n}\x1b[?2026l")
+        };
+        let complete = |n: usize| {
+            let mut term = terminal(&config, &theme::DEFAULT).unwrap();
+            term.resize(20, 3, 8, 16).unwrap();
+            term.vt_write(frame(n).as_bytes());
+            paint(&mut Renderer::new().unwrap(), &term)
+        };
+
+        // An editor scrolling for longer than the timeout, with every redraw
+        // split across PTY reads, so each paint falls in the middle of one.
+        let start = Instant::now();
+        let mut sync = SyncBuffer::default();
+        let mut rest = Vec::new();
+        for n in 0..40 {
+            let now = start + Duration::from_millis(n as u64 * 50);
+            let bytes = frame(n).into_bytes();
+            let (first, second) = bytes.split_at(bytes.len() / 2);
+            // One read finishes the previous redraw and starts this one.
+            rest.extend_from_slice(first);
+            term.vt_write(&sync.push(&rest, now));
+            rest = second.to_vec();
+            if n > 0 {
+                let painted = paint(&mut renderer, &term);
+                assert!(
+                    painted == complete(n - 1),
+                    "paint {n} showed a partial redraw"
+                );
+            }
+        }
     }
 }
 
@@ -369,6 +551,7 @@ impl Pane {
             selection_start: None,
             focused: false,
             saved_session: None,
+            sync: SyncBuffer::default(),
         })
     }
 
@@ -378,14 +561,24 @@ impl Pane {
         }
         // Bound work per frame as well as queued bytes, so one busy PTY cannot starve others.
         let mut drained = 0;
+        let now = Instant::now();
+        let mut ready = self.sync.take_ready(now);
         for _ in 0..64 {
             match self.pty.output.try_recv() {
                 Ok(data) => {
-                    self.terminal.vt_write(&data);
+                    ready.extend(self.sync.push(&data, now));
                     drained += 1;
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
+        }
+        if !ready.is_empty() {
+            self.terminal.vt_write(&ready);
+        }
+        // Output arriving later wakes the UI anyway; this covers an update
+        // that never ends.
+        if let Some(deadline) = self.sync.deadline() {
+            ctx.request_repaint_after(deadline.saturating_duration_since(now));
         }
         if self.pty.exited.try_recv().is_ok() {
             self.dead = true;

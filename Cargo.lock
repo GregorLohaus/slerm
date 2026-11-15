@@ -2929,6 +2929,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "png",
  "portable-pty",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "shell-words",
