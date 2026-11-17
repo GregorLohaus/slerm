@@ -20,15 +20,18 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal && rustup default stable
 
-      # Zig 0.15.2 can't link against the default Xcode's SDK on the macOS 26 image;
-      # Ghostty's CI pins the same version.
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+      # libghostty-vt-sys builds Ghostty from source, which needs Zig 0.15. Upstream 0.15.2's
+      # Mach-O linker only matches `arm64-macos` in .tbd stubs, but SDKs since 26.4 list just
+      # `arm64e-macos`, so every libSystem symbol comes up undefined
+      # (https://codeberg.org/ziglang/zig/issues/31658). The fix only landed in 0.16; Homebrew's
+      # zig@0.15 carries it as a backport, so it links against any Xcode on the image.
+      - name: Install Zig
+        run: |
+          brew install zig@0.15
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
 
-      # libghostty-vt-sys builds Ghostty from source, which needs Zig 0.15.2+.
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
+      - name: Show toolchain
+        run: zig version && xcrun --show-sdk-path
 
       - uses: Swatinem/rust-cache@v2
 
