@@ -3,6 +3,7 @@ mod config;
 mod fonts;
 mod input;
 mod layout;
+mod links;
 #[cfg(target_os = "macos")]
 mod macos;
 mod pane;

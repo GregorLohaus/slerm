@@ -16,6 +16,8 @@ panels.
 
 - **Ghostty's terminal emulation**: the same VT parser and Kitty graphics protocol support.
 - **Tabs, tiled panes and floating panes**, with zoom and keyboard focus movement.
+- **Clickable links**: Cmd+click (Ctrl+click on Linux) opens URLs and OSC 8 hyperlinks.
+- **OSC 52 clipboard**: programs can copy to your clipboard, including over SSH and from tmux.
 - **Themes**: `slerm` plus every theme Helix ships (`slerm --list-themes`), with per-color overrides.
 - **Font control**: pick a family or file, with bold/italic matching and fallback fonts for Nerd Font icons.
 - **Plugins in TypeScript**, run in embedded [Boa](https://boajs.dev), with native sidebars and
@@ -84,6 +86,7 @@ Default key bindings:
 | `Alt+S` | Open scrollback in your editor |
 | `Ctrl+Shift+Z` | Zoom pane |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+| `Cmd`/`Ctrl` + click | Open the link under the pointer |
 | `Ctrl+Shift+R` | Reload config |
 
 Directional focus and next/previous pane also reach plugin panels: side panels

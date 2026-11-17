@@ -31,6 +31,8 @@ pub struct Config {
     pub accent: Option<String>,
     /// Colors overriding the theme, keyed by the names in `theme::FIELDS`.
     pub colors: BTreeMap<String, String>,
+    /// Let programs set the clipboard with OSC 52, for example over SSH.
+    pub clipboard_write: bool,
     pub kitty: Kitty,
     pub multiplexer: Multiplexer,
     pub keys: BTreeMap<String, Binding>,
@@ -179,6 +181,7 @@ impl Default for Config {
             foreground: None,
             accent: None,
             colors: BTreeMap::new(),
+            clipboard_write: true,
             kitty: Kitty::default(),
             multiplexer: Multiplexer::default(),
             plugins: Vec::new(),

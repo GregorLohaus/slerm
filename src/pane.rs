@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    input,
+    input, links,
     pty::Pty,
     render::{Grid, Renderer, cell_size},
     theme::{self, Theme},
@@ -111,6 +111,10 @@ pub struct Pane {
     focused: bool,
     saved_session: Option<(Box<Pane>, ScrollbackFile)>,
     sync: SyncBuffer,
+    /// Text the application asked to put on the clipboard (OSC 52).
+    clipboard: Rc<RefCell<Option<String>>>,
+    /// The link under the pointer while the open-link modifier is held.
+    hovered_link: Option<links::Link>,
 }
 
 struct ScrollbackFile(PathBuf);
@@ -307,6 +311,75 @@ mod sync_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_request_tests {
+    use super::*;
+
+    fn pane(ctx: &egui::Context) -> Pane {
+        let config = Config {
+            shell: vec!["/bin/sh".into()],
+            ..Default::default()
+        };
+        Pane::new(&config, &theme::DEFAULT, ctx, None).unwrap()
+    }
+
+    #[test]
+    fn osc_52_requests_reach_the_clipboard_queue() {
+        let ctx = egui::Context::default();
+        let mut pane = pane(&ctx);
+        assert_eq!(pane.take_clipboard_write(), None);
+        // What tmux, Helix and Neovim send; base64 for "héllo\nworld".
+        pane.terminal.vt_write(b"\x1b]52;c;aMOpbGxvCndvcmxk\x07");
+        assert_eq!(pane.take_clipboard_write().as_deref(), Some("héllo\nworld"));
+        assert_eq!(pane.take_clipboard_write(), None);
+        // An empty selector and the ST terminator are common too.
+        pane.terminal.vt_write(b"\x1b]52;;c2Vjb25k\x1b\\");
+        assert_eq!(pane.take_clipboard_write().as_deref(), Some("second"));
+        // Reading the clipboard back is not supported, so nothing answers.
+        pane.terminal.vt_write(b"\x1b]52;c;?\x07");
+        assert_eq!(pane.take_clipboard_write(), None);
+    }
+
+    #[test]
+    fn command_hover_finds_the_link_under_the_pointer() {
+        let ctx = egui::Context::default();
+        let mut pane = pane(&ctx);
+        let config = Config::default();
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 200.0));
+        let run = |pane: &mut Pane, pos: egui::Pos2, modifiers: egui::Modifiers| {
+            let mut cell = egui::Vec2::ZERO;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(rect),
+                    modifiers,
+                    events: vec![egui::Event::PointerMoved(pos)],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        cell = cell_size(ui.painter(), &FontId::monospace(config.font_size));
+                        pane.show(ui, rect, &config, &theme::DEFAULT, true).unwrap();
+                    });
+                },
+            );
+            cell
+        };
+        let cell = run(&mut pane, egui::Pos2::ZERO, egui::Modifiers::NONE);
+        pane.terminal
+            .vt_write(b"\x1b[2J\x1b[Hopen https://example.com now");
+        // The grid is inset by 6 points; aim at the 10th column.
+        let over = egui::pos2(6.0 + cell.x * 9.5, 6.0 + cell.y * 0.5);
+        run(&mut pane, over, egui::Modifiers::NONE);
+        assert_eq!(pane.hovered_link, None, "links need the modifier");
+        run(&mut pane, over, egui::Modifiers::COMMAND);
+        let link = pane.hovered_link.clone().expect("link under the pointer");
+        assert_eq!(link.uri, "https://example.com");
+        let beside = egui::pos2(6.0 + cell.x * 1.5, 6.0 + cell.y * 0.5);
+        run(&mut pane, beside, egui::Modifiers::COMMAND);
+        assert_eq!(pane.hovered_link, None);
     }
 }
 
@@ -534,6 +607,16 @@ impl Pane {
         }));
         let size = report_size.clone();
         terminal.on_size(move |_| Some(*size.borrow()))?;
+        let clipboard = Rc::new(RefCell::new(None));
+        let request = clipboard.clone();
+        terminal.on_clipboard_write(move |_, write| {
+            let text = write
+                .contents()
+                .find(|content| content.mime.starts_with("text/plain"))
+                .ok_or(terminal::ClipboardWriteError::Unsupported)?;
+            *request.borrow_mut() = Some(text.data.to_owned());
+            Ok(())
+        })?;
         Ok(Self {
             terminal,
             renderer,
@@ -552,6 +635,8 @@ impl Pane {
             focused: false,
             saved_session: None,
             sync: SyncBuffer::default(),
+            clipboard,
+            hovered_link: None,
         })
     }
 
@@ -600,6 +685,12 @@ impl Pane {
             *self = *session;
             ctx.request_repaint();
         }
+    }
+
+    /// The latest text the application asked to copy, such as with OSC 52
+    /// from a program running over SSH. Whether to honor it is up to the caller.
+    pub fn take_clipboard_write(&mut self) -> Option<String> {
+        self.clipboard.borrow_mut().take()
     }
 
     pub fn open_scrollback(
@@ -761,6 +852,17 @@ impl Pane {
                 active,
             },
         )?;
+        if let Some(link) = &self.hovered_link {
+            let stroke = egui::Stroke::new(1.0_f32, theme::color(theme.accent));
+            for (y, columns) in link.rows(self.size.0) {
+                let baseline = grid.top() + (y + 1) as f32 * ch - 1.0;
+                ui.painter().with_clip_rect(grid).hline(
+                    grid.left() + columns.start as f32 * cw..=grid.left() + columns.end as f32 * cw,
+                    baseline,
+                    stroke,
+                );
+            }
+        }
         if let Some(error) = &self.error {
             ui.painter().text(
                 grid.left_bottom() - vec2(0.0, ch),
@@ -797,6 +899,37 @@ impl Pane {
             return Ok(());
         };
         let local = pos - grid.min;
+        let point = PointCoordinate {
+            x: (local.x / cell.x)
+                .floor()
+                .clamp(0.0, (self.size.0 - 1) as f32) as u16,
+            y: (local.y / cell.y)
+                .floor()
+                .clamp(0.0, (self.size.1 - 1) as f32) as u32,
+        };
+        // Cmd+click on macOS, Ctrl+click elsewhere, opens a link. It takes the
+        // click even from applications that track the mouse.
+        self.hovered_link = None;
+        if modifiers.command && response.hovered() && grid.contains(pos) {
+            self.hovered_link = links::at(&self.terminal, point, self.size.0, self.size.1 as u32)?;
+        }
+        if let Some(link) = &self.hovered_link {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if link.explicit {
+                // The text of an OSC 8 link can say anything; show where it goes.
+                egui::Tooltip::always_open(
+                    ui.ctx().clone(),
+                    ui.layer_id(),
+                    ui.id().with("link"),
+                    egui::PopupAnchor::Pointer,
+                )
+                .show(|ui| ui.label(&link.uri));
+            }
+            if response.clicked() {
+                links::open(&link.uri)?;
+            }
+            return Ok(());
+        }
         if tracking && response.hovered() {
             let events = ui.input(|i| i.events.clone());
             self.mouse_encoder
@@ -879,14 +1012,6 @@ impl Pane {
             }
             self.send(data)?;
         } else if !tracking {
-            let point = PointCoordinate {
-                x: (local.x / cell.x)
-                    .floor()
-                    .clamp(0.0, (self.size.0 - 1) as f32) as u16,
-                y: (local.y / cell.y)
-                    .floor()
-                    .clamp(0.0, (self.size.1 - 1) as f32) as u32,
-            };
             if response.drag_started() {
                 let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
                 let origin = origin - grid.min;

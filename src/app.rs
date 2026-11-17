@@ -824,6 +824,11 @@ impl eframe::App for App {
         }
         for pane in self.panes.values_mut() {
             pane.drain(ctx);
+            if let Some(text) = pane.take_clipboard_write()
+                && self.config.clipboard_write
+            {
+                ctx.copy_text(text);
+            }
         }
         self.poll_plugins(ctx);
         if self.tabs.is_empty() {

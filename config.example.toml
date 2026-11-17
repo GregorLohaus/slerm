@@ -45,6 +45,13 @@ theme = "slerm"
 # red = "#cc6666"
 # bright_red = "#d54e53"
 
+# Let programs put text on the clipboard with OSC 52, as tmux, Helix and Neovim
+# do over SSH. They can only write it; reading the clipboard is not supported.
+clipboard_write = true
+
+# Cmd+click (Ctrl+click on Linux) opens http, https, file, ftp and mailto links,
+# both URLs in the text and OSC 8 hyperlinks.
+
 [kitty]
 image_storage_mb = 64
 allow_file = true
