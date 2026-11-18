@@ -69,7 +69,8 @@ pub struct Multiplexer {
     pub floating_max_height: f32,
     /// Corner radius of pane borders in points; 0 for square corners.
     pub corner_radius: u8,
-    /// Title bars on tiled panes. Floating panes keep theirs to be moved by.
+    /// Title bars on panes. Floating panes move by theirs, so without them
+    /// floats stay where they open.
     pub title_bars: bool,
 }
 

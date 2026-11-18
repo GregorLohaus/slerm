@@ -69,7 +69,8 @@ floating_max_width = 960
 floating_max_height = 640
 # Pane border corner radius in points; 0 for square corners.
 corner_radius = 5
-# Title bars on tiled panes. Floating panes keep theirs, since they move by it.
+# Title bars on panes. Floating panes move by theirs, so without them floats
+# stay where they open (they can still be resized).
 title_bars = true
 
 # Environment for panes and plugin processes. $NAME and ${NAME} expand from

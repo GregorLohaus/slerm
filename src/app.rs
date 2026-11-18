@@ -996,6 +996,8 @@ impl eframe::App for App {
                 let window = egui::Window::new(pane_title(id, pane))
                     .id(window_id)
                     .title_bar(false)
+                    // A floating pane moves by its title bar; without one it stays put.
+                    .movable(self.config.multiplexer.title_bars)
                     .constrain_to(workspace)
                     .min_size(vec2(160.0, 100.0))
                     .frame(egui::Frame::NONE.fill(bg));
@@ -1011,10 +1013,9 @@ impl eframe::App for App {
                     let rect = ui.available_rect_before_wrap();
                     ui.allocate_rect(rect, egui::Sense::hover());
                     pane.last_rect = rect;
-                    // Floating panes keep their title bar: it is how they are moved.
                     let chrome = Chrome {
                         active,
-                        title: true,
+                        title: self.config.multiplexer.title_bars,
                     };
                     if show_pane(ui, id, pane, rect, &self.config, &self.theme, chrome) {
                         tab.active = id;
