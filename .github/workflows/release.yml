@@ -1,11 +1,12 @@
 name: Release
 
-# Gitea mirrors branches to GitHub but not necessarily tags, so releases are
-# driven by the version in Cargo.toml: bump it on main and the build publishes a
-# release named v<version>. Pushes that keep the version only upload an artifact.
+# Releases are driven by tags: pushing v<version> builds slerm <version>, publishes the
+# v<version> release and points the Homebrew cask at it. Pushes to main only build and
+# upload an artifact. The tag has to reach GitHub, so a Gitea push mirror must sync tags.
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -33,13 +34,33 @@ jobs:
       - name: Show toolchain
         run: zig version && xcrun --show-sdk-path
 
+      # On a tag, the tag is the version: it is written into Cargo.toml and Cargo.lock so
+      # `slerm --version`, TERM_PROGRAM_VERSION and the bundle all report it. Other builds keep
+      # the version in Cargo.toml.
+      - name: Set version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME isn't v<semver>, e.g. v0.1.4"
+              exit 1
+            fi
+            V="$version" perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{V}"/m' Cargo.toml
+            V="$version" perl -0pi -e 's/(\nname = "slerm"\nversion = )"[^"]*"/$1"$ENV{V}"/' Cargo.lock
+            grep -qx "version = \"$version\"" Cargo.toml
+          else
+            version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
+          echo "SLERM_VERSION=$version" >> "$GITHUB_ENV"
+          echo "Building slerm $version"
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --release --locked
 
       - name: Bundle slerm.app
-        run: scripts/bundle-macos.sh
+        run: scripts/bundle-macos.sh "$SLERM_VERSION"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -47,33 +68,33 @@ jobs:
           path: target/bundle/slerm-*
 
       - name: Publish release
-        if: github.ref == 'refs/heads/main'
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          if draft="$(gh release view "v$version" --json isDraft --jq .isDraft 2>/dev/null)"; then
+          tag="$GITHUB_REF_NAME"
+          if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
             # A draft is invisible to everyone else, so Homebrew's download would 404.
             if [[ "$draft" == true ]]; then
-              gh release edit "v$version" --draft=false
-              echo "Published the existing draft release v$version."
+              gh release edit "$tag" --draft=false
+              echo "Published the existing draft release $tag."
             else
-              echo "Release v$version already exists; bump the version in Cargo.toml to publish a new one."
+              echo "Release $tag already exists; push a new tag to publish a new one."
             fi
             exit 0
           fi
-          gh release create "v$version" target/bundle/slerm-* \
-            --target "$GITHUB_SHA" --title "slerm $version" --generate-notes --draft=false
+          gh release create "$tag" target/bundle/slerm-* \
+            --verify-tag --title "slerm $SLERM_VERSION" --generate-notes --draft=false
 
-      # Points `brew install --cask <owner>/tap/slerm` at the release for the version in
-      # Cargo.toml. It runs on every push, so a missed update is repaired by the next one. It
+      # Points `brew install --cask <owner>/tap/slerm` at the release for this tag. Re-running the
+      # workflow on the tag repairs a missed update. It
       # downloads the zip anonymously from the same URL the cask uses, so the tap is only updated
       # once Homebrew can fetch it, and the checksum is of the published zip rather than this
       # run's rebuild, which can differ.
       # Needs a HOMEBREW_TAP_TOKEN secret: a fine-grained token with Contents read/write on the
       # <owner>/homebrew-tap repo.
       - name: Update Homebrew cask
-        if: github.ref == 'refs/heads/main'
+        if: github.ref_type == 'tag'
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAP: ${{ github.repository_owner }}/homebrew-tap
@@ -82,9 +103,9 @@ jobs:
             echo "::warning::HOMEBREW_TAP_TOKEN isn't set, so $TAP keeps its current slerm cask"
             exit 0
           fi
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          version="$SLERM_VERSION"
           zip="slerm-$version-macos-arm64.zip"
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$version/$zip"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$zip"
           if ! curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/$zip" "$url"; then
             echo "::error::$url isn't publicly downloadable; is the release still a draft?"
             exit 1

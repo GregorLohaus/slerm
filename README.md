@@ -123,12 +123,13 @@ the PNG and ICNS; see [`assets/README.md`](assets/README.md).
 
 Every push to `main` runs
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the
-macOS app on GitHub Actions and uploads it as a build artifact. If no release exists
-yet for the `version` in `Cargo.toml`, it also publishes `v<version>` on GitHub
-Releases with the zip and its SHA-256 checksum. To cut a new release, bump the version
-and push to `main`; no tag is needed, so it works with a Gitea-to-GitHub mirror.
+macOS app on GitHub Actions and uploads it as a build artifact. To cut a release, push a
+`v<version>` tag (e.g. `git tag v0.1.5 && git push origin v0.1.5`): the build takes its
+version from the tag, writing it into `Cargo.toml` for that build only, and publishes the
+`v<version>` release on GitHub Releases with the zip and its SHA-256 checksum. With a
+Gitea-to-GitHub push mirror, make sure the mirror syncs tags.
 
-The same workflow then points the `slerm` cask in
+On a tag, the same workflow then points the `slerm` cask in
 [GregorLohaus/homebrew-tap](https://github.com/GregorLohaus/homebrew-tap) at that release,
 using [`scripts/homebrew-cask.sh`](scripts/homebrew-cask.sh), so edit the cask there. This
 needs a `HOMEBREW_TAP_TOKEN` repository secret: a fine-grained token with Contents
